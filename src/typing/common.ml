@@ -441,6 +441,7 @@ module MetaInfo = struct
 		| KeepInit -> ":keepInit",("Causes a class to be kept by DCE even if all its field are removed",[UsedOn TClass])
 		| KeepSub -> ":keepSub",("Extends @:keep metadata to all implementing and extending classes",[UsedOn TClass])
 		| LibType -> ":libType",("Used by -net-lib and -java-lib to mark a class that shouldn't be checked (overrides, interfaces, etc) by the type loader",[Internal; UsedOn TClass; Platforms [Java;Cs]])
+		| LoopLabel -> ":loopLabel",("Mark loop and break expressions with a label to support breaking from within switch",[Internal])
 		| Meta -> ":meta",("Internally used to mark a class field as being the metadata field",[])
 		| Macro -> ":macro",("(deprecated)",[])
 		| MaybeUsed -> ":maybeUsed",("Internally used by DCE to mark fields that might be kept",[Internal])
