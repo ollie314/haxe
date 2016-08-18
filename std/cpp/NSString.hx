@@ -19,32 +19,27 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-package cs;
-import cs.internal.Exceptions;
-import cs.internal.FieldLookup;
-import cs.internal.Function;
-import cs.internal.HxObject;
-import cs.internal.Runtime;
-// TODO (see Gencommon.IteratorsInterfaceModf)
-//import cs.internal.Iterator;
-#if !erase_generics
-import cs.internal.Null;
-#end
-import cs.internal.StringExt;
-#if unsafe
-import cs.internal.BoxedPointer;
-#end
-import cs.StdTypes;
-import haxe.ds.StringMap;
-import Reflect;
+package cpp;
 
-@:dox(hide)
-class Boot
+@:native("NSString") @:objc extern class NSStringData { }
+
+@:objc
+extern abstract NSString( NSStringData )
 {
+   @:native(" (NSString *)") @:extern static function StringToNSString(s:String) : NSString return null;
+   @:native(" (NSString *)") @:extern static function StringToNSStringData(s:String) : NSStringData return null;
+   @:native("String") @:extern static function NSStringDataToString(s:NSStringData) : String return null;
 
-	@:keep public static function init():Void
-	{
-		cs.Lib.applyCultureChanges();
-	}
+
+   inline function new(s:NSStringData) this = s;
+
+
+   @:from @:extern
+   static public inline function fromString(s:String):NSString return new NSString( StringToNSStringData(s) );
+
+
+   @:to @:extern
+   public inline function toString():String return NSStringDataToString(this);
 
 }
+

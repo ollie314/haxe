@@ -19,32 +19,9 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-package cs;
-import cs.internal.Exceptions;
-import cs.internal.FieldLookup;
-import cs.internal.Function;
-import cs.internal.HxObject;
-import cs.internal.Runtime;
-// TODO (see Gencommon.IteratorsInterfaceModf)
-//import cs.internal.Iterator;
-#if !erase_generics
-import cs.internal.Null;
-#end
-import cs.internal.StringExt;
-#if unsafe
-import cs.internal.BoxedPointer;
-#end
-import cs.StdTypes;
-import haxe.ds.StringMap;
-import Reflect;
+ package cpp;
 
-@:dox(hide)
-class Boot
-{
-
-	@:keep public static function init():Void
-	{
-		cs.Lib.applyCultureChanges();
-	}
-
+@:native("size_t")
+@:scalar @:coreType @:notNull
+extern abstract SizeT from(Int) to(Int) {
 }
