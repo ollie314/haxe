@@ -19,6 +19,17 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-package hl.types;
+package cpp.cppia;
 
-@:coreType @:notNull @:runtimeValue abstract I16 to Int from Int {}
+
+@:native("hx::CppiaLoadedModule")
+@:build(cpp.cppia.HostClasses.include())
+extern class Module
+{
+   @:native("__scriptable_cppia_from_string")
+   public static function fromString(sourceCode:String) : Module;
+   public function boot():Void;
+   public function run():Void;
+   public function resolveClass(inName:String):Class<Dynamic>;
+}
+

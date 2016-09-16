@@ -1203,7 +1203,7 @@ let configure gen =
 			fun w p -> ()
 		else fun w p ->
 			let cur_line = Lexer.get_error_line p in
-			let file = Common.get_full_path p.pfile in
+			let file = Path.get_full_path p.pfile in
 			print w "//line %d \"%s\"" cur_line (Ast.s_escape file); newline w
 	in
 
@@ -2182,6 +2182,7 @@ let configure gen =
 				let t = gen.gclasses.nativearray_type hash_array.etype in
 				{ hash_array with eexpr = TCall(rcf_static_remove t, [hash_array; length; pos]); etype = gen.gcon.basic.tvoid }
 			)
+			None
 		in
 
 	ReflectionCFs.UniversalBaseClass.configure gen (get_cl (get_type gen (["haxe";"lang"],"HxObject")) ) object_iface dynamic_object;
@@ -2428,7 +2429,7 @@ let configure gen =
 		output_string f v;
 		close_out f;
 
-		out_files := (unique_full_path full_path) :: !out_files
+		out_files := (Path.unique_full_path full_path) :: !out_files
 	) gen.gcon.resources;
 	(try
 		let c = get_cl (Hashtbl.find gen.gtypes (["haxe"], "Resource")) in

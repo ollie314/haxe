@@ -176,8 +176,8 @@ and mark_t dce p t =
 			List.iter (mark_t dce p) pl
 		| TAbstract(a,pl) when Meta.has Meta.MultiType a.a_meta ->
 			begin try
-				mark_t dce p (snd (Codegen.AbstractCast.find_multitype_specialization dce.com a pl p))
-			with Typecore.Error _ ->
+				mark_t dce p (snd (Typecore.AbstractCast.find_multitype_specialization dce.com a pl p))
+			with Error.Error _ ->
 				()
 			end
 		| TAbstract(a,pl) ->
@@ -570,7 +570,7 @@ let run com main full =
 	let dce = {
 		com = com;
 		full = full;
-		std_dirs = if full then [] else List.map Common.unique_full_path com.std_path;
+		std_dirs = if full then [] else List.map Path.unique_full_path com.std_path;
 		debug = Common.defined com Define.DceDebug;
 		added_fields = [];
 		follow_expr = expr;
@@ -609,7 +609,7 @@ let run com main full =
 			begin match c.cl_init with
 				| Some e when keep_class || Meta.has Meta.KeepInit c.cl_meta ->
 					(* create a fake field to deal with our internal logic (issue #3286) *)
-					let cf = mk_field "__init__" e.etype e.epos in
+					let cf = mk_field "__init__" e.etype e.epos null_pos in
 					cf.cf_expr <- Some e;
 					loop true cf
 				| _ ->

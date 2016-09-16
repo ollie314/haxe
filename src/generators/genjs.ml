@@ -71,7 +71,7 @@ let get_exposed ctx path meta =
 		(match args with
 			| [ EConst (String s), _ ] -> [s]
 			| [] -> [path]
-			| _ -> error "Invalid @:expose parameters" pos)
+			| _ -> abort "Invalid @:expose parameters" pos)
 	with Not_found -> []
 
 let dot_path = Ast.s_type_path
@@ -136,7 +136,7 @@ let static_field c s =
 let has_feature ctx = Common.has_feature ctx.com
 let add_feature ctx = Common.add_feature ctx.com
 
-let unsupported p = error "This expression cannot be compiled to Javascript" p
+let unsupported p = abort "This expression cannot be compiled to Javascript" p
 
 
 let add_mapping ctx force e =
@@ -240,7 +240,7 @@ let write_mappings ctx =
 	let channel = open_out_bin (ctx.com.file ^ ".map") in
 	let sources = DynArray.to_list ctx.smap.sources in
 	let to_url file =
-		ExtString.String.map (fun c -> if c == '\\' then '/' else c) (Common.get_full_path file)
+		ExtString.String.map (fun c -> if c == '\\' then '/' else c) (Path.get_full_path file)
 	in
 	output_string channel "{\n";
 	output_string channel "\"version\":3,\n";
@@ -370,7 +370,7 @@ let rec gen_call ctx e el in_value =
 	match e.eexpr , el with
 	| TConst TSuper , params ->
 		(match ctx.current.cl_super with
-		| None -> error "Missing api.setCurrentClass" e.epos
+		| None -> abort "Missing api.setCurrentClass" e.epos
 		| Some (c,_) ->
 			print ctx "%s.call(%s" (ctx.type_accessor (TClassDecl c)) (this ctx);
 			List.iter (fun p -> print ctx ","; gen_value ctx p) params;
@@ -378,7 +378,7 @@ let rec gen_call ctx e el in_value =
 		);
 	| TField ({ eexpr = TConst TSuper },f) , params ->
 		(match ctx.current.cl_super with
-		| None -> error "Missing api.setCurrentClass" e.epos
+		| None -> abort "Missing api.setCurrentClass" e.epos
 		| Some (c,_) ->
 			let name = field_name f in
 			print ctx "%s.prototype%s.call(%s" (ctx.type_accessor (TClassDecl c)) (field name) (this ctx);
@@ -473,16 +473,29 @@ let rec gen_call ctx e el in_value =
 		concat ctx "," (gen_value ctx) el;
 		spr ctx ")"
 
+(*
+	this wraps {} in parenthesis which is required to produce valid js code for field and array access to it.
+	the case itself is very rare and most probably comes from redundant code fused by the analyzer,
+	but we still have to support it.
+*)
+and add_objectdecl_parens e =
+	let rec loop e = match e.eexpr with
+		| TCast(e1,None) | TMeta(_,e1) -> loop e1 (* TODO: do we really want to lose these? *)
+		| TObjectDecl _ -> {e with eexpr = TParenthesis e}
+		| _ -> e
+	in
+	loop e
+
 and gen_expr ctx e =
 	add_mapping ctx false e;
 	(match e.eexpr with
 	| TConst c -> gen_constant ctx e.epos c
 	| TLocal v -> spr ctx (ident v.v_name)
 	| TArray (e1,{ eexpr = TConst (TString s) }) when valid_js_ident s && (match e1.eexpr with TConst (TInt _|TFloat _) -> false | _ -> true) ->
-		gen_value ctx e1;
+		gen_value ctx (add_objectdecl_parens e1);
 		spr ctx (field s)
 	| TArray (e1,e2) ->
-		gen_value ctx e1;
+		gen_value ctx (add_objectdecl_parens e1);
 		spr ctx "[";
 		gen_value ctx e2;
 		spr ctx "]";
@@ -527,7 +540,7 @@ and gen_expr ctx e =
 	| TField (x,f) ->
 		let rec skip e = match e.eexpr with
 			| TCast(e1,None) | TMeta(_,e1) -> skip e1
-			| TConst(TInt _ | TFloat _) -> {e with eexpr = TParenthesis e}
+			| TConst(TInt _ | TFloat _) | TObjectDecl _ -> {e with eexpr = TParenthesis e}
 			| _ -> e
 		in
 		let x = skip x in
@@ -982,7 +995,7 @@ let generate_package_create ctx (p,_) =
 let check_field_name c f =
 	match f.cf_name with
 	| "prototype" | "__proto__" | "constructor" ->
-		error ("The field name '" ^ f.cf_name ^ "'  is not allowed in JS") (match f.cf_expr with None -> c.cl_pos | Some e -> e.epos);
+		abort ("The field name '" ^ f.cf_name ^ "'  is not allowed in JS") (match f.cf_expr with None -> c.cl_pos | Some e -> e.epos);
 	| _ -> ()
 
 (* convert a.b.c to ["a"]["b"]["c"] *)
@@ -1047,7 +1060,7 @@ let generate_class ctx c =
 	ctx.current <- c;
 	ctx.id_counter <- 0;
 	(match c.cl_path with
-	| [],"Function" -> error "This class redefine a native one" c.cl_pos
+	| [],"Function" -> abort "This class redefine a native one" c.cl_pos
 	| _ -> ());
 	let p = s_path ctx c.cl_path in
 	let hxClasses = has_feature ctx "Type.resolveClass" in
@@ -1211,7 +1224,7 @@ let generate_require ctx path meta =
 	| [(EConst(String(module_name)),_) ; (EConst(String(object_path)),_)] ->
 		print ctx "%s = require(\"%s\").%s" p module_name object_path
 	| _ ->
-		error "Unsupported @:jsRequire format" mp);
+		abort "Unsupported @:jsRequire format" mp);
 
 	newline ctx
 

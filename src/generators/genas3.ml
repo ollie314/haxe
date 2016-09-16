@@ -203,7 +203,7 @@ let gen_local ctx l =
 let spr ctx s = Buffer.add_string ctx.buf s
 let print ctx = Printf.kprintf (fun s -> Buffer.add_string ctx.buf s)
 
-let unsupported p = error "This expression cannot be generated to AS3" p
+let unsupported p = abort "This expression cannot be generated to AS3" p
 
 let newline ctx =
 	let rec loop p =
@@ -281,7 +281,7 @@ let rec type_str ctx t p =
 	| TInst (c,_) ->
 		(match c.cl_kind with
 		| KNormal | KGeneric | KGenericInstance _ | KAbstractImpl _ -> s_path ctx false c.cl_path p
-		| KTypeParameter _ | KExtension _ | KExpr _ | KMacroType | KGenericBuild _ -> "*")
+		| KTypeParameter _ | KExpr _ | KMacroType | KGenericBuild _ -> "*")
 	| TFun _ ->
 		"Function"
 	| TMono r ->
@@ -977,7 +977,7 @@ let generate_field ctx static f =
 				match a with
 				| Ast.EConst (Ast.String s) -> (None, s)
 				| Ast.EBinop (Ast.OpAssign,(Ast.EConst (Ast.Ident n),_),(Ast.EConst (Ast.String s),_)) -> (Some n, s)
-				| _ -> error "Invalid meta definition" p
+				| _ -> abort "Invalid meta definition" p
 			in
 			print ctx "[%s" n;
 			(match args with

@@ -52,15 +52,15 @@ CC_PARSER_CMD = $(COMPILER) -pp camlp4o $(ALL_CFLAGS) -c src/syntax/parser.ml
 
 RELDIR=../../..
 
-MODULES=json syntax/ast typing/type syntax/lexer typing/common generators/genxml syntax/parser typing/typecore \
-	display/display \
-	optimization/optimizer typing/typeload generators/codegen generators/gencommon generators/genas3 \
+MODULES=json version globals path syntax/ast display/displayTypes typing/type typing/error syntax/lexer typing/common generators/genxml \
+	syntax/parser typing/typecore display/display optimization/optimizerTexpr \
+	optimization/optimizer typing/overloads typing/typeload generators/codegen generators/gencommon generators/genas3 \
 	generators/gencpp generators/genjs generators/genneko generators/genphp generators/genswf9 \
-	generators/genswf generators/genjava generators/gencs generators/genpy macro/interp generators/genhl \
+	generators/genswf generators/genjava generators/gencs generators/genpy macro/interp generators/hlcode generators/hlopt generators/hlinterp generators/hl2c generators/genhl \
 	generators/genlua \
 	optimization/dce optimization/analyzerConfig optimization/analyzerTypes optimization/analyzerTexpr \
 	optimization/analyzerTexprTransformer optimization/analyzer \
-	optimization/filters typing/typer typing/matcher version main
+	optimization/filters typing/typer typing/matcher display/displayOutput server main
 
 ADD_REVISION?=0
 
@@ -134,23 +134,27 @@ uninstall:
 
 # display
 
-src/display/display.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT)
+src/display/display.$(MODULE_EXT): src/path.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/display/displayTypes.$(MODULE_EXT)
+
+src/display/displayTypes.$(MODULE_EXT) : src/syntax/ast.$(MODULE_EXT)
+
+src/display/displayOutput.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/typer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/display/display.$(MODULE_EXT)
 
 # generators
 
-src/generators/codegen.$(MODULE_EXT): src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/generators/genxml.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/display/display.$(MODULE_EXT)
+src/generators/codegen.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/generators/genxml.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
 src/generators/genas3.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
-src/generators/gencommon.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/typeload.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
+src/generators/gencommon.$(MODULE_EXT):src/typing/error.$(MODULE_EXT) src/typing/overloads.$(MODULE_EXT) src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
 
-src/generators/gencpp.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/generators/gencpp.$(MODULE_EXT): src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
-src/generators/gencs.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/generators/gencommon.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
+src/generators/gencs.$(MODULE_EXT): src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/generators/gencommon.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
 
-src/generators/genjava.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/generators/gencommon.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/generators/genjava.$(MODULE_EXT): src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/generators/gencommon.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
-src/generators/genjs.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/generators/genjs.$(MODULE_EXT): src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
 src/generators/genneko.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
@@ -162,33 +166,41 @@ src/generators/genpy.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lex
 
 src/generators/genswf.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/generators/genswf9.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
-src/generators/genhl.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT)
+src/generators/hlinterp.$(MODULE_EXT): src/generators/hlcode.$(MODULE_EXT)
 
-src/generators/genswf9.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/generators/hl2c.$(MODULE_EXT): src/generators/hlcode.$(MODULE_EXT)
+
+src/generators/hlopt.$(MODULE_EXT): src/generators/hlcode.$(MODULE_EXT)
+
+src/generators/genhl.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT) src/generators/hlcode.$(MODULE_EXT) src/generators/hlinterp.$(MODULE_EXT) src/generators/hl2c.$(MODULE_EXT) src/generators/hlopt.$(MODULE_EXT)
+
+src/generators/genswf9.$(MODULE_EXT): src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
 src/generators/genxml.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
 # macro
 
-src/macro/interp.$(MODULE_EXT): src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/generators/genneko.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/generators/genswf.$(MODULE_EXT) src/generators/genjava.$(MODULE_EXT) src/generators/gencs.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
+src/macro/interp.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/globals.$(MODULE_EXT) src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/generators/genneko.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/generators/genswf.$(MODULE_EXT) src/generators/genjava.$(MODULE_EXT) src/generators/gencs.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
 
 # optimization
 
-src/optimization/analyzer.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/analyzerTypes.$(MODULE_EXT) src/optimization/analyzerTexpr.$(MODULE_EXT) src/optimization/analyzerTexprTransformer.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT)
+src/optimization/analyzer.$(MODULE_EXT): src/optimization/optimizer.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/analyzerTypes.$(MODULE_EXT) src/optimization/analyzerTexpr.$(MODULE_EXT) src/optimization/analyzerTexprTransformer.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT)
 
 src/optimization/analyzerConfig.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT)
 
-src/optimization/analyzerTexpr.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT)
+src/optimization/analyzerTexpr.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/optimizerTexpr.$(MODULE_EXT)
 
-src/optimization/analyzerTexprTransformer.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/analyzerTypes.$(MODULE_EXT) src/optimization/analyzerTexpr.$(MODULE_EXT)
+src/optimization/analyzerTexprTransformer.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT) src/optimization/analyzerTypes.$(MODULE_EXT) src/optimization/analyzerTexpr.$(MODULE_EXT)
 
 src/optimization/analyzerTypes.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT)
 
-src/optimization/dce.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/typing/type.$(MODULE_EXT)
+src/optimization/dce.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/path.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT)
 
-src/optimization/filters.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/optimization/analyzer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/optimization/dce.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT)
+src/optimization/filters.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/optimization/analyzer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/optimization/dce.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT)
 
-src/optimization/optimizer.$(MODULE_EXT): src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/optimization/optimizer.$(MODULE_EXT): src/optimization/optimizerTexpr.$(MODULE_EXT) src/display/display.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+
+src/optimization/optimizerTexpr.$(MODULE_EXT): src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
 # syntax
 
@@ -196,27 +208,36 @@ src/syntax/ast.$(MODULE_EXT):
 
 src/syntax/lexer.$(MODULE_EXT): src/syntax/lexer.ml src/syntax/ast.$(MODULE_EXT)
 
-src/syntax/parser.$(MODULE_EXT): src/syntax/parser.ml src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/syntax/parser.$(MODULE_EXT): src/path.$(MODULE_EXT) src/syntax/parser.ml src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 	$(CC_PARSER_CMD)
 
 # typing
 
-src/typing/common.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
+src/typing/common.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/display/displayTypes.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
 
-src/typing/matcher.$(MODULE_EXT): src/optimization/optimizer.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/typer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/typing/error.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+
+src/typing/matcher.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/typer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+
+src/typing/overloads.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT)
 
 src/typing/type.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/json.$(MODULE_EXT)
 
-src/typing/typecore.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
+src/typing/typecore.$(MODULE_EXT): src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
-src/typing/typeload.$(MODULE_EXT): src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/json.$(MODULE_EXT) src/display/display.$(MODULE_EXT)
+src/typing/typeload.$(MODULE_EXT): src/optimization/optimizerTexpr.$(MODULE_EXT) src/typing/overloads.$(MODULE_EXT) src/path.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/json.$(MODULE_EXT) src/display/display.$(MODULE_EXT)
 
-src/typing/typer.$(MODULE_EXT): src/typing/typeload.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/optimization/filters.$(MODULE_EXT) src/generators/genjs.$(MODULE_EXT) src/generators/genlua.$(MODULE_EXT) src/display/display.$(MODULE_EXT)
-
+src/typing/typer.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/optimization/optimizerTexpr.$(MODULE_EXT) src/typing/overloads.$(MODULE_EXT) src/path.$(MODULE_EXT) src/typing/typeload.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/optimization/filters.$(MODULE_EXT) src/generators/genjs.$(MODULE_EXT) src/generators/genlua.$(MODULE_EXT) src/display/display.$(MODULE_EXT)
 
 # main
 
-src/main.$(MODULE_EXT): src/optimization/filters.$(MODULE_EXT) src/typing/matcher.$(MODULE_EXT) src/typing/typer.$(MODULE_EXT) src/typing/typeload.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT) src/generators/genxml.$(MODULE_EXT) src/generators/genswf.$(MODULE_EXT) src/generators/genphp.$(MODULE_EXT) src/generators/genneko.$(MODULE_EXT) src/generators/genjs.$(MODULE_EXT) src/generators/genlua.$(MODULE_EXT) src/generators/gencpp.$(MODULE_EXT) src/generators/genas3.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/generators/genjava.$(MODULE_EXT) src/generators/gencs.$(MODULE_EXT) src/generators/genpy.$(MODULE_EXT) src/generators/genhl.$(MODULE_EXT) src/version.$(MODULE_EXT) src/display/display.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
+src/main.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/globals.$(MODULE_EXT) src/path.$(MODULE_EXT) src/optimization/filters.$(MODULE_EXT) src/typing/matcher.$(MODULE_EXT) src/typing/typer.$(MODULE_EXT) src/typing/typeload.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/optimization/optimizer.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT) src/generators/genxml.$(MODULE_EXT) src/generators/genswf.$(MODULE_EXT) src/generators/genphp.$(MODULE_EXT) src/generators/genneko.$(MODULE_EXT) src/generators/genjs.$(MODULE_EXT) src/generators/genlua.$(MODULE_EXT) src/generators/gencpp.$(MODULE_EXT) src/generators/genas3.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/generators/genjava.$(MODULE_EXT) src/generators/gencs.$(MODULE_EXT) src/generators/genpy.$(MODULE_EXT) src/generators/genhl.$(MODULE_EXT) src/display/display.$(MODULE_EXT) src/server.$(MODULE_EXT) src/display/displayOutput.$(MODULE_EXT) libs/ilib/il.$(LIB_EXT)
+
+src/globals.$(MODULE_EXT): src/version.$(MODULE_EXT)
+
+src/path.$(MODULE_EXT): src/globals.$(MODULE_EXT)
+
+src/server.$(MODULE_EXT): src/globals.$(MODULE_EXT) src/path.$(MODULE_EXT) src/typing/typer.$(MODULE_EXT) src/typing/typeload.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/parser.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/display/displayOutput.$(MODULE_EXT)
 
 src/version.$(MODULE_EXT):
 	$(MAKE) -f Makefile.version_extra -s --no-print-directory ADD_REVISION=$(ADD_REVISION) BRANCH=$(BRANCH) COMMIT_SHA=$(COMMIT_SHA) COMMIT_DATE=$(COMMIT_DATE) > src/version.ml
@@ -231,7 +252,7 @@ package_src:
 	curl -s https://raw.githubusercontent.com/Kentzo/git-archive-all/1.12/git-archive-all -o extra/git-archive-all
 	python extra/git-archive-all $(PACKAGE_OUT_DIR)/$(PACKAGE_FILE_NAME)_src$(PACKAGE_SRC_EXTENSION)
 
-package_bin:
+package_bin::
 	mkdir -p $(PACKAGE_OUT_DIR)
 	rm -rf $(PACKAGE_FILE_NAME) $(PACKAGE_FILE_NAME).tar.gz
 	# Copy the package contents to $(PACKAGE_FILE_NAME)
@@ -278,7 +299,7 @@ clean_libs:
 	make -C libs/objsize clean
 
 clean_haxe:
-	rm -f -r  $(MODULES:%=src/%.obj) $(MODULES:%=src/%.o) $(MODULES:%=src/%.cmx) $(MODULES:%=src/%.cmi) $(MODULES:%=src/%.cmo) src/syntax/lexer.ml src/version.ml $(OUTPUT)
+	rm -f -r  $(MODULES:%=src/%.obj) $(MODULES:%=src/%.o) $(MODULES:%=src/%.cmx) $(MODULES:%=src/%.cmi) $(MODULES:%=src/%.cmo) $(MODULES:%=src/%.cmt) src/syntax/lexer.ml src/version.ml $(OUTPUT)
 
 clean_tools:
 	rm -f $(OUTPUT) haxelib
