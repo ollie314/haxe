@@ -684,7 +684,7 @@ let write_c version file (code:code) =
 				sexpr "%s->%s = %s" (reg obj) (ident name) (rcast v t)
 			| HVirtual vp ->
 				let name, nid, t = vp.vfields.(fid) in
-				let dset = sprintf "hl_dyn_set%s((vdynamic*)%s,%ld/*%s*/%s,%s)" (dyn_prefix t) (reg obj) (hash nid) name (type_value_opt (rtype v)) (reg v) in
+				let dset = sprintf "hl_dyn_set%s(%s->value,%ld/*%s*/%s,%s)" (dyn_prefix t) (reg obj) (hash nid) name (type_value_opt (rtype v)) (reg v) in
 				(match t with
 				| HFun _ -> expr dset
 				| _ -> sexpr "if( hl_vfields(%s)[%d] ) *(%s*)(hl_vfields(%s)[%d]) = (%s)%s; else %s" (reg obj) fid (ctype t) (reg obj) fid (ctype t) (reg v) dset)
@@ -699,7 +699,7 @@ let write_c version file (code:code) =
 				sexpr "%s%s->%s" (rassign r t) (reg obj) (ident name)
 			| HVirtual v ->
 				let name, nid, t = v.vfields.(fid) in
-				let dget = sprintf "(%s)hl_dyn_get%s((vdynamic*)%s,%ld/*%s*/%s)" (ctype t) (dyn_prefix t) (reg obj) (hash nid) name (type_value_opt t) in
+				let dget = sprintf "(%s)hl_dyn_get%s(%s->value,%ld/*%s*/%s)" (ctype t) (dyn_prefix t) (reg obj) (hash nid) name (type_value_opt t) in
 				(match t with
 				| HFun _ -> sexpr "%s%s" (rassign r t) dget
 				| _ -> sexpr "%shl_vfields(%s)[%d] ? (*(%s*)(hl_vfields(%s)[%d])) : %s" (rassign r t) (reg obj) fid (ctype t) (reg obj) fid dget)
@@ -1006,9 +1006,9 @@ let write_c version file (code:code) =
 				sexpr "hl_throw((vdynamic*)%s)" (reg r)
 			| ORethrow r ->
 				sexpr "hl_rethrow((vdynamic*)%s)" (reg r)
-			| OGetI8 (r,b,idx) ->
+			| OGetUI8 (r,b,idx) ->
 				sexpr "%s = *(unsigned char*)(%s + %s)" (reg r) (reg b) (reg idx)
-			| OGetI16 (r,b,idx) ->
+			| OGetUI16 (r,b,idx) ->
 				sexpr "%s = *(unsigned short*)(%s + %s)" (reg r) (reg b) (reg idx)
 			| OGetI32 (r,b,idx) ->
 				sexpr "%s = *(int*)(%s + %s)" (reg r) (reg b) (reg idx)
@@ -1018,9 +1018,9 @@ let write_c version file (code:code) =
 				sexpr "%s = *(double*)(%s + %s)" (reg r) (reg b) (reg idx)
 			| OGetArray (r, arr, idx) ->
 				sexpr "%s = ((%s*)(%s + 1))[%s]" (reg r) (ctype (rtype r)) (reg arr) (reg idx)
-			| OSetI8 (b,idx,r) ->
+			| OSetUI8 (b,idx,r) ->
 				sexpr "*(unsigned char*)(%s + %s) = (unsigned char)%s" (reg b) (reg idx) (reg r)
-			| OSetI16 (b,idx,r) ->
+			| OSetUI16 (b,idx,r) ->
 				sexpr "*(unsigned short*)(%s + %s) = (unsigned short)%s" (reg b) (reg idx) (reg r)
 			| OSetI32 (b,idx,r) ->
 				sexpr "*(int*)(%s + %s) = %s" (reg b) (reg idx) (reg r)
@@ -1061,12 +1061,18 @@ let write_c version file (code:code) =
 			| OMakeEnum (r,cid,rl) ->
 				let e, et = (match rtype r with HEnum e -> e, enum_constr_type e cid | _ -> assert false) in
 				let has_ptr = List.exists (fun r -> is_gc_ptr (rtype r)) rl in
-				sexpr "%s = (venum*)hl_gc_alloc%s(sizeof(%s))" (reg r) (if has_ptr then "" else "_noptr") et;
-				sexpr "%s->index = %d" (reg r) cid;
+				let need_tmp = List.mem r rl in
+				let tmp = if not need_tmp then reg r else begin
+					sexpr "{ venum *tmp";
+					"tmp"
+				end in
+				sexpr "%s = (venum*)hl_gc_alloc%s(sizeof(%s))" tmp (if has_ptr then "" else "_noptr") et;
+				sexpr "%s->index = %d" tmp cid;
 				let _,_,tl = e.efields.(cid) in
 				list_iteri (fun i v ->
-					sexpr "((%s*)%s)->p%d = %s" et (reg r) i (rcast v tl.(i))
+					sexpr "((%s*)%s)->p%d = %s" et tmp i (rcast v tl.(i))
 				) rl;
+				if need_tmp then sexpr "%s = tmp; }" (reg r)
 			| OEnumAlloc (r,cid) ->
 				let et, (_,_,tl) = (match rtype r with HEnum e -> enum_constr_type e cid, e.efields.(cid) | _ -> assert false) in
 				let has_ptr = List.exists is_gc_ptr (Array.to_list tl) in

@@ -113,7 +113,13 @@ let rec wait_loop process_params verbose accept =
 				has_parse_error := false;
 				let data = Typeload.parse_file com2 file p in
 				if verbose then print_endline ("Parsed " ^ ffile);
-				if not !has_parse_error && (not is_display_file) then Hashtbl.replace cache.c_files fkey (ftime,data);
+				if not !has_parse_error && (not is_display_file) then begin
+					try
+						let ident = Hashtbl.find Parser.special_identifier_files ffile in
+						if verbose then print_endline (Printf.sprintf "%s not cached (using \"%s\" define)" ffile ident);
+					with Not_found ->
+						Hashtbl.replace cache.c_files fkey (ftime,data);
+				end;
 				data
 	);
 	let cache_module m =
@@ -233,7 +239,6 @@ let rec wait_loop process_params verbose accept =
 	let run_count = ref 0 in
 	while true do
 		let read, write, close = accept() in
-		let t0 = get_time() in
 		let rec cache_context com =
 			if com.display.dms_full_typing then begin
 				List.iter cache_module com.modules;
@@ -273,6 +278,7 @@ let rec wait_loop process_params verbose accept =
 		in
 		(try
 			let s = read() in
+			let t0 = get_time() in
 			let hxml =
 				try
 					let idx = String.index s '\001' in

@@ -113,9 +113,9 @@ let opcode_fx frw op =
 		()
 	| OEndTrap _ ->
 		() (* ??? *)
-	| OGetI8 (d,a,b) | OGetI16 (d,a,b) | OGetI32 (d,a,b) | OGetF32 (d,a,b) | OGetF64 (d,a,b) | OGetArray (d,a,b) ->
+	| OGetUI8 (d,a,b) | OGetUI16 (d,a,b) | OGetI32 (d,a,b) | OGetF32 (d,a,b) | OGetF64 (d,a,b) | OGetArray (d,a,b) ->
 		read a; read b; write d
-	| OSetI8 (a,b,c) | OSetI16 (a,b,c) | OSetI32 (a,b,c) | OSetF32 (a,b,c) | OSetF64 (a,b,c) | OSetArray (a,b,c) ->
+	| OSetUI8 (a,b,c) | OSetUI16 (a,b,c) | OSetI32 (a,b,c) | OSetF32 (a,b,c) | OSetF64 (a,b,c) | OSetArray (a,b,c) ->
 		read a; read b; read c
 	| ONew d ->
 		write d
@@ -132,14 +132,17 @@ let opcode_fx frw op =
 	| ODump r ->
 		read r
 
-let optimize dump (f:fundecl) =
-	let op index = f.code.(index) in
-	
-	let write str = match dump with None -> () | Some ch -> IO.nwrite ch (str ^ "\n") in
+(* build code graph *)
 
-	(* build code graph *)
-	
+let code_graph (f:fundecl) =
+	let op index = f.code.(index) in
 	let blocks_pos = Hashtbl.create 0 in
+	let all_blocks = Hashtbl.create 0 in
+	for i = 0 to Array.length f.code - 1 do
+		match control (op i) with
+		| CJAlways d | CJCond d -> Hashtbl.replace all_blocks (i + 1 + d) true
+		| _ -> ()
+	done;
 	let rec make_block pos =
 		try
 			Hashtbl.find blocks_pos pos
@@ -158,7 +161,10 @@ let optimize dump (f:fundecl) =
 					b2.bprev <- b :: b2.bprev;
 					b2
 				in
-				match control (op i) with
+				if i > pos && Hashtbl.mem all_blocks i then begin
+					b.bend <- i - 1;
+					b.bnext <- [goto (-1)];
+				end else match control (op i) with
 				| CNo ->
 					loop (i + 1)
 				| CRet | CThrow ->
@@ -172,20 +178,23 @@ let optimize dump (f:fundecl) =
 				| CJCond d | CTry d ->
 					b.bend <- i;
 					b.bnext <- [goto 0; goto d];
-				| CLabel when i = pos ->
+				| CLabel ->
 					b.bloop <- true;
 					loop (i + 1)
-				| CLabel ->
-					b.bend <- i - 1;
-					b.bnext <- [goto (-1)];
 			in
 			loop pos;
 			b
 	in
-	let root = make_block 0 in
+	blocks_pos, make_block 0
+
+let optimize dump (f:fundecl) =
+	let op index = f.code.(index) in
+	let write str = match dump with None -> () | Some ch -> IO.nwrite ch (str ^ "\n") in
+
+	let blocks_pos, root = code_graph f in
 	
 	(* build registers liveness *)
-	
+(*	
 	let rec liveness (b:block) regs =
 		let regs = ref regs in
 		let rec loop i =
@@ -220,7 +229,7 @@ let optimize dump (f:fundecl) =
 		| _ :: args ->
 			loop (i + 1) args (PMap.add i [(-1,-1)] map) 
 	in
-(*	let live = liveness root (loop 0 (match f.ftype with HFun (args,_) -> args | _ -> assert false) PMap.empty) in
+	let live = liveness root (loop 0 (match f.ftype with HFun (args,_) -> args | _ -> assert false) PMap.empty) in
 	*)
 	(* done *)
 	
@@ -229,8 +238,9 @@ let optimize dump (f:fundecl) =
 			if i = Array.length f.code then () else
 			let block = try 
 				let nblock = Hashtbl.find blocks_pos i in
-				write (Printf.sprintf "\t----- [%s]"
+				write (Printf.sprintf "\t----- [%s] (%d)"
 					(String.concat "," (List.map (fun b -> string_of_int b.bstart) nblock.bnext))
+					nblock.bend
 				);
 				nblock
 			with Not_found ->

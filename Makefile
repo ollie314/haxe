@@ -17,6 +17,8 @@ INSTALL_STD_DIR=$(INSTALL_LIB_DIR)/std
 PACKAGE_OUT_DIR=out
 PACKAGE_SRC_EXTENSION=.tar.gz
 
+PLATFORM?=unix
+
 OUTPUT=haxe
 EXTENSION=
 OCAMLOPT?=ocamlopt
@@ -166,13 +168,13 @@ src/generators/genpy.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lex
 
 src/generators/genswf.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/generators/genswf9.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
-src/generators/hlinterp.$(MODULE_EXT): src/generators/hlcode.$(MODULE_EXT)
+src/generators/hlinterp.$(MODULE_EXT): src/typing/common.$(MODULE_EXT) src/generators/hlcode.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT)
 
 src/generators/hl2c.$(MODULE_EXT): src/generators/hlcode.$(MODULE_EXT)
 
 src/generators/hlopt.$(MODULE_EXT): src/generators/hlcode.$(MODULE_EXT)
 
-src/generators/genhl.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/macro/interp.$(MODULE_EXT) src/generators/hlcode.$(MODULE_EXT) src/generators/hlinterp.$(MODULE_EXT) src/generators/hl2c.$(MODULE_EXT) src/generators/hlopt.$(MODULE_EXT)
+src/generators/genhl.$(MODULE_EXT): src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/generators/hlcode.$(MODULE_EXT) src/generators/hlinterp.$(MODULE_EXT) src/generators/hl2c.$(MODULE_EXT) src/generators/hlopt.$(MODULE_EXT)
 
 src/generators/genswf9.$(MODULE_EXT): src/path.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/syntax/lexer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT)
 
@@ -194,7 +196,7 @@ src/optimization/analyzerTexprTransformer.$(MODULE_EXT): src/typing/error.$(MODU
 
 src/optimization/analyzerTypes.$(MODULE_EXT): src/syntax/ast.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/optimization/analyzerConfig.$(MODULE_EXT)
 
-src/optimization/dce.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/path.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT)
+src/optimization/dce.$(MODULE_EXT): src/typing/typecore.$(MODULE_EXT) src/typing/error.$(MODULE_EXT) src/path.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT)
 
 src/optimization/filters.$(MODULE_EXT): src/typing/error.$(MODULE_EXT) src/syntax/ast.$(MODULE_EXT) src/optimization/analyzer.$(MODULE_EXT) src/typing/common.$(MODULE_EXT) src/typing/type.$(MODULE_EXT) src/optimization/dce.$(MODULE_EXT) src/generators/codegen.$(MODULE_EXT) src/typing/typecore.$(MODULE_EXT)
 
@@ -252,7 +254,7 @@ package_src:
 	curl -s https://raw.githubusercontent.com/Kentzo/git-archive-all/1.12/git-archive-all -o extra/git-archive-all
 	python extra/git-archive-all $(PACKAGE_OUT_DIR)/$(PACKAGE_FILE_NAME)_src$(PACKAGE_SRC_EXTENSION)
 
-package_bin::
+package_unix:
 	mkdir -p $(PACKAGE_OUT_DIR)
 	rm -rf $(PACKAGE_FILE_NAME) $(PACKAGE_FILE_NAME).tar.gz
 	# Copy the package contents to $(PACKAGE_FILE_NAME)
@@ -262,6 +264,7 @@ package_bin::
 	tar -zcf $(PACKAGE_OUT_DIR)/$(PACKAGE_FILE_NAME)_bin.tar.gz $(PACKAGE_FILE_NAME)
 	rm -r $(PACKAGE_FILE_NAME)
 
+package_bin: package_$(PLATFORM)
 
 install_dox:
 	haxelib git hxparse https://github.com/Simn/hxparse development src

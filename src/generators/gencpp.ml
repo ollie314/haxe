@@ -1310,11 +1310,19 @@ let hx_stack_push ctx output clazz func_name pos =
            if (clazz="*") then
              (" (" ^ esc_file ^ ":" ^ (string_of_int (Lexer.get_error_line pos) ) ^ ")")
            else "") in
+
          let hash_class_func = gen_hash 0 (clazz^"."^func_name) in
          let hash_file = gen_hash 0 stripped_file in
-         output ("HX_STACK_FRAME(\"" ^ clazz ^ "\",\"" ^ func_name ^ "\"," ^ hash_class_func ^ ",\"" ^
-               full_name ^ "\",\"" ^ esc_file ^ "\"," ^
-               (string_of_int (Lexer.get_error_line pos) ) ^  "," ^ hash_file ^ ")\n")
+
+         let out_top = ctx.ctx_writer#write_h in
+         let lineName  = (string_of_int (Lexer.get_error_line pos) ) in
+         incr ctx.ctx_file_id;
+         let id = string_of_int( !(ctx.ctx_file_id) ) in
+         let varName = "_hx_pos_" ^func_name ^ "_" ^ id in
+         out_top ("namespace { HX_DEFINE_STACK_FRAME(" ^ varName ^ ",\"" ^ clazz ^ "\",\"" ^ func_name ^ "\"," ^ hash_class_func ^ ",\"" ^
+                 full_name ^ "\",\"" ^ esc_file ^ "\"," ^
+                 lineName ^  "," ^ hash_file ^ ")\n}\n");
+         output ("HX_STACKFRAME(&" ^ varName ^ ")\n");
       end
    end
 ;;
@@ -7074,7 +7082,7 @@ let generate_source ctx =
    (match common_ctx.main with
    | None -> generate_dummy_main common_ctx
    | Some e ->
-      let main_field = { cf_name = "__main__"; cf_type = t_dynamic; cf_expr = Some e; cf_pos = e.epos; cf_name_pos = null_pos; cf_public = true; cf_meta = []; cf_overloads = []; cf_doc = None; cf_kind = Var { v_read = AccNormal; v_write = AccNormal; }; cf_params = [] } in
+      let main_field = { cf_name = "__main__"; cf_type = t_dynamic; cf_expr = Some e; cf_expr_unoptimized = None; cf_pos = e.epos; cf_name_pos = null_pos; cf_public = true; cf_meta = []; cf_overloads = []; cf_doc = None; cf_kind = Var { v_read = AccNormal; v_write = AccNormal; }; cf_params = [] } in
       let class_def = { null_class with cl_path = ([],"@Main"); cl_ordered_statics = [main_field] } in
       main_deps := find_referenced_types ctx (TClassDecl class_def) super_deps constructor_deps false true false;
       generate_main ctx super_deps class_def
