@@ -24,11 +24,54 @@ type context = {
 let report_times print =
 	let tot = ref 0. in
 	Hashtbl.iter (fun _ t -> tot := !tot +. t.total) Common.htimers;
-	print (Printf.sprintf "Total time : %.3fs" !tot);
 	if !tot > 0. then begin
-		print "------------------------------------";
-		let timers = List.sort (fun t1 t2 -> compare t1.name t2.name) (Hashtbl.fold (fun _ t acc -> t :: acc) Common.htimers []) in
-		List.iter (fun t -> print (Printf.sprintf "  %s : %.3fs, %.0f%%" t.name t.total (t.total *. 100. /. !tot))) timers
+		let buckets = Hashtbl.create 0 in
+		let add id time calls =
+			try
+				let time',calls' = Hashtbl.find buckets id in
+				Hashtbl.replace buckets id (time' +. time,calls' + calls)
+			with Not_found ->
+				Hashtbl.add buckets id (time,calls)
+		in
+		Hashtbl.iter (fun _ t ->
+			let rec loop acc ids = match ids with
+				| id :: ids ->
+					add (List.rev (id :: acc)) t.total t.calls;
+					loop (id :: acc) ids
+				| [] ->
+					()
+			in
+			loop [] t.id
+		) Common.htimers;
+		let max_name = ref 0 in
+		let max_calls = ref 0 in
+		let timers = Hashtbl.fold (fun id t acc ->
+			let name,indent = match List.rev id with
+				| [] -> assert false
+				| name :: l -> name,(String.make (List.length l * 2) ' ')
+			in
+			let name,info = try
+				let i = String.rindex name '.' in
+				String.sub name (i + 1) (String.length name - i - 1),String.sub name 0 i
+			with Not_found ->
+				name,""
+			in
+			let name = indent ^ name in
+			if String.length name > !max_name then max_name := String.length name;
+			if snd t > !max_calls then max_calls := snd t;
+			(id,name,info,t) :: acc
+		) buckets [] in
+		let max_calls = String.length (string_of_int !max_calls) in
+		print (Printf.sprintf "%-*s | %7s |   %% | %*s | info" !max_name "name" "time(s)" max_calls "#");
+		let sep = String.make (!max_name + max_calls + 21) '-' in
+		print sep;
+		let timers = List.sort (fun (id1,_,_,_) (id2,_,_,_) -> compare id1 id2) timers in
+		let print_timer id name info (time,calls) =
+			print (Printf.sprintf "%-*s | %7.3f | %3.0f | %*i | %s" !max_name name time (time *. 100. /. !tot) max_calls calls info)
+		in
+		List.iter (fun (id,name,info,t) -> print_timer id name info t) timers;
+		print sep;
+		print_timer ["total"] "total" "" (!tot,0)
 	end
 
 let default_flush ctx =
@@ -86,12 +129,22 @@ let ssend sock str =
 let rec wait_loop process_params verbose accept =
 	Sys.catch_break false;
 	let has_parse_error = ref false in
-	let cache = {
-		c_haxelib = Hashtbl.create 0;
-		c_files = Hashtbl.create 0;
-		c_modules = Hashtbl.create 0;
-	} in
-	global_cache := Some cache;
+
+	let signs = ref [] in
+	let sign_string com =
+		let sign = get_signature com in
+		let	sign_id =
+			try
+				List.assoc sign !signs
+			with Not_found ->
+				let i = string_of_int (List.length !signs) in
+				signs := (sign,i) :: !signs;
+				print_endline (Printf.sprintf "Found context %s:\n%s" i (dump_context com));
+				i
+		in
+		Printf.sprintf "%2s,%3s: " sign_id (short_platform_name com.platform)
+	in
+	let cs = CompilationServer.create () in
 	Typer.macro_enable_cache := true;
 	let current_stdin = ref None in
 	Typeload.parse_hook := (fun com2 file p ->
@@ -106,25 +159,27 @@ let rec wait_loop process_params verbose accept =
 			let ftime = file_time ffile in
 			let fkey = (ffile,sign) in
 			try
-				let time, data = Hashtbl.find cache.c_files fkey in
+				let time, data = CompilationServer.find_file cs fkey in
 				if time <> ftime then raise Not_found;
 				data
 			with Not_found ->
 				has_parse_error := false;
 				let data = Typeload.parse_file com2 file p in
-				if verbose then print_endline ("Parsed " ^ ffile);
-				if not !has_parse_error && (not is_display_file) then begin
-					try
+				let info = if !has_parse_error then "not cached, has parse error"
+					else if is_display_file then "not cached, is display file"
+					else begin try
+						(* We assume that when not in display mode it's okay to cache stuff that has #if display
+						   checks. The reasoning is that non-display mode has more information than display mode. *)
+						if not com2.display.dms_display then raise Not_found;
 						let ident = Hashtbl.find Parser.special_identifier_files ffile in
-						if verbose then print_endline (Printf.sprintf "%s not cached (using \"%s\" define)" ffile ident);
+						Printf.sprintf "not cached, using \"%s\" define" ident;
 					with Not_found ->
-						Hashtbl.replace cache.c_files fkey (ftime,data);
-				end;
+						CompilationServer.cache_file cs fkey (ftime,data);
+						"cached"
+				end in
+				if verbose then print_endline (Printf.sprintf "%sparsed %s (%s)" (sign_string com2) ffile info);
 				data
 	);
-	let cache_module m =
-		Hashtbl.replace cache.c_modules (m.m_path,m.m_extra.m_sign) m;
-	in
 	let check_module_path com m p =
 		if m.m_extra.m_file <> Path.unique_full_path (Typeload.resolve_module_file com m.m_path (ref[]) p) then begin
 			if verbose then print_endline ("Module path " ^ s_type_path m.m_path ^ " has been changed");
@@ -135,7 +190,7 @@ let rec wait_loop process_params verbose accept =
 	let compilation_mark = ref 0 in
 	let mark_loop = ref 0 in
 	Typeload.type_module_hook := (fun (ctx:Typecore.typer) mpath p ->
-		let t = Common.timer "module cache check" in
+		let t = Common.timer ["server";"module cache"] in
 		let com2 = ctx.Typecore.com in
 		let sign = get_signature com2 in
 		let dep = ref None in
@@ -180,7 +235,7 @@ let rec wait_loop process_params verbose accept =
 						check_module_path mctx.Typecore.com m p
 					);
 					if file_time m.m_extra.m_file <> m.m_extra.m_time then begin
-						if verbose then print_endline ("File " ^ m.m_extra.m_file ^ (if m.m_extra.m_time = -1. then " not cached (macro-in-macro)" else " has been modified"));
+						if verbose then print_endline (Printf.sprintf "%s%s not cached (%s)" (sign_string com2) (s_type_path m.m_path) (if m.m_extra.m_time = -1. then "macro-in-macro" else "modified"));
 						if m.m_extra.m_kind = MFake then Hashtbl.remove Typecore.fake_modules m.m_extra.m_file;
 						raise Not_found;
 					end;
@@ -192,14 +247,14 @@ let rec wait_loop process_params verbose accept =
 				m.m_extra.m_dirty <- true;
 				false
 		in
-		let rec add_modules m0 m =
+		let rec add_modules tabs m0 m =
 			if m.m_extra.m_added < !compilation_step then begin
 				(match m0.m_extra.m_kind, m.m_extra.m_kind with
 				| MCode, MMacro | MMacro, MCode ->
 					(* this was just a dependency to check : do not add to the context *)
 					PMap.iter (Hashtbl.replace com2.resources) m.m_extra.m_binded_res;
 				| _ ->
-					if verbose then print_endline ("Reusing  cached module " ^ Ast.s_type_path m.m_path);
+					if verbose then print_endline (Printf.sprintf "%s%sreusing %s" (sign_string com2) tabs (s_type_path m.m_path));
 					m.m_extra.m_added <- !compilation_step;
 					List.iter (fun t ->
 						match t with
@@ -219,17 +274,22 @@ let rec wait_loop process_params verbose accept =
 					) m.m_types;
 					if m.m_extra.m_kind <> MSub then Typeload.add_module ctx m p;
 					PMap.iter (Hashtbl.replace com2.resources) m.m_extra.m_binded_res;
-					PMap.iter (fun _ m2 -> add_modules m0 m2) m.m_extra.m_deps);
+					PMap.iter (fun _ m2 -> add_modules (tabs ^ "  ") m0 m2) m.m_extra.m_deps);
 					List.iter (Typer.call_init_macro ctx) m.m_extra.m_macro_calls
 			end
 		in
 		try
-			let m = Hashtbl.find cache.c_modules (mpath,sign) in
+			let m = CompilationServer.find_module cs (mpath,sign) in
+			let tcheck = Common.timer ["server";"module cache";"check"] in
 			if not (check m) then begin
-				if verbose then print_endline ("Skipping cached module " ^ Ast.s_type_path mpath ^ (match !dep with None -> "" | Some m -> "(" ^ Ast.s_type_path m.m_path ^ ")"));
+				if verbose then print_endline (Printf.sprintf "%sskipping %s%s" (sign_string com2) (s_type_path m.m_path) (Option.map_default (fun m -> Printf.sprintf " (via %s)" (s_type_path m.m_path)) "" !dep));
+				tcheck();
 				raise Not_found;
 			end;
-			add_modules m m;
+			tcheck();
+			let tadd = Common.timer ["server";"module cache";"add modules"] in
+			add_modules "" m m;
+			tadd();
 			t();
 			Some m
 		with Not_found ->
@@ -240,6 +300,10 @@ let rec wait_loop process_params verbose accept =
 	while true do
 		let read, write, close = accept() in
 		let rec cache_context com =
+			let cache_module m =
+				CompilationServer.cache_module cs (m.m_path,m.m_extra.m_sign) m;
+				if verbose then print_endline (Printf.sprintf "%scached %s" (sign_string com) (s_type_path m.m_path));
+			in
 			if com.display.dms_full_typing then begin
 				List.iter cache_module com.modules;
 				if verbose then print_endline ("Cached " ^ string_of_int (List.length com.modules) ^ " modules");
@@ -268,9 +332,9 @@ let rec wait_loop process_params verbose accept =
 					let file = (!Parser.resume_display).Ast.pfile in
 					let fkey = (file,get_signature ctx.com) in
 					(* force parsing again : if the completion point have been changed *)
-					Hashtbl.remove cache.c_files fkey;
+					CompilationServer.remove_file cs fkey;
 					(* force module reloading (if cached) *)
-					Hashtbl.iter (fun _ m -> if m.m_extra.m_file = file then m.m_extra.m_dirty <- true) cache.c_modules
+					CompilationServer.taint_modules cs file;
 				end
 			);
 			ctx.com.print <- (fun str -> write ("\x01" ^ String.concat "\x01" (ExtString.String.nsplit str "\n") ^ "\n"));
@@ -300,7 +364,7 @@ let rec wait_loop process_params verbose accept =
 				stats.s_methods_typed := 0;
 				stats.s_macros_called := 0;
 				Hashtbl.clear Common.htimers;
-				let _ = Common.timer "other" in
+				let _ = Common.timer ["other"] in
 				incr compilation_step;
 				compilation_mark := !mark_loop;
 				start_time := get_time();

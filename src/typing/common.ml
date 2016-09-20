@@ -306,13 +306,91 @@ exception Abort of string * Ast.pos
 
 let display_default = ref DisplayMode.DMNone
 
-type cache = {
-	mutable c_haxelib : (string list, string list) Hashtbl.t;
-	mutable c_files : ((string * string), float * Ast.package) Hashtbl.t;
-	mutable c_modules : (path * string, module_def) Hashtbl.t;
-}
+let get_signature com =
+	match com.defines_signature with
+	| Some s -> s
+	| None ->
+		let defines = PMap.foldi (fun k v acc ->
+			(* don't make much difference between these special compilation flags *)
+			match String.concat "_" (ExtString.String.nsplit k "-") with
+			(* If we add something here that might be used in conditional compilation it should be added to
+			   Parser.parse_macro_ident as well (issue #5682). *)
+			| "display" | "use_rtti_doc" | "macro_times" | "display_details" | "no_copt" | "display_stdin" -> acc
+			| _ -> (k ^ "=" ^ v) :: acc
+		) com.defines [] in
+		let str = String.concat "@" (List.sort compare defines) in
+		let s = Digest.string str in
+		com.defines_signature <- Some s;
+		s
 
-let global_cache : cache option ref = ref None
+module CompilationServer = struct
+	type cache = {
+		mutable c_haxelib : (string list, string list) Hashtbl.t;
+		mutable c_files : ((string * string), float * Ast.package) Hashtbl.t;
+		mutable c_modules : (path * string, module_def) Hashtbl.t;
+	}
+
+	type t = {
+		cache : cache
+	}
+
+	let instance : t option ref = ref None
+
+	let create_cache () = {
+		c_haxelib = Hashtbl.create 0;
+		c_files = Hashtbl.create 0;
+		c_modules = Hashtbl.create 0;
+	}
+
+	let create () =
+		let cs = {
+			cache = create_cache();
+		} in
+		instance := Some cs;
+		cs
+
+	let get () =
+		!instance
+
+	let runs () =
+		!instance <> None
+
+	let get_context_files cs signs =
+		Hashtbl.fold (fun (file,sign) (_,data) acc ->
+			if (List.mem sign signs) then (file,data) :: acc
+			else acc
+		) cs.cache.c_files []
+
+	(* modules *)
+
+	let find_module cs key =
+		Hashtbl.find cs.cache.c_modules key
+
+	let cache_module cs key value =
+		Hashtbl.replace cs.cache.c_modules key value
+
+	let taint_modules cs file =
+		Hashtbl.iter (fun _ m -> if m.m_extra.m_file = file then m.m_extra.m_dirty <- true) cs.cache.c_modules
+
+	(* files *)
+
+	let find_file cs key =
+		Hashtbl.find cs.cache.c_files key
+
+	let cache_file cs key value =
+		Hashtbl.replace cs.cache.c_files key value
+
+	let remove_file cs key =
+		Hashtbl.remove cs.cache.c_files key
+
+	(* haxelibs *)
+
+	let find_haxelib cs key =
+		Hashtbl.find cs.cache.c_haxelib key
+
+	let cache_haxelib cs key value =
+		Hashtbl.replace cs.cache.c_haxelib key value
+end
 
 module Define = struct
 
@@ -526,6 +604,19 @@ let platform_name = function
 	| Cs -> "cs"
 	| Java -> "java"
 	| Python -> "python"
+	| Hl -> "hl"
+
+let short_platform_name = function
+	| Cross -> "x"
+	| Js -> "js"
+	| Lua -> "lua"
+	| Neko -> "n"
+	| Flash -> "swf"
+	| Php -> "php"
+	| Cpp -> "cpp"
+	| Cs -> "cs"
+	| Java -> "jav"
+	| Python -> "py"
 	| Hl -> "hl"
 
 module MetaInfo = struct
@@ -990,23 +1081,6 @@ let clone com =
 let file_time file =
 	try (Unix.stat file).Unix.st_mtime with _ -> 0.
 
-let get_signature com =
-	match com.defines_signature with
-	| Some s -> s
-	| None ->
-		let defines = PMap.foldi (fun k v acc ->
-			(* don't make much difference between these special compilation flags *)
-			match String.concat "_" (ExtString.String.nsplit k "-") with
-			(* If we add something here that might be used in conditional compilation it should be added to
-			   Parser.parse_macro_ident as well (issue #5682). *)
-			| "display" | "use_rtti_doc" | "macro_times" | "display_details" | "no_copt" | "display_stdin" -> acc
-			| _ -> (k ^ "=" ^ v) :: acc
-		) com.defines [] in
-		let str = String.concat "@" (List.sort compare defines) in
-		let s = Digest.string str in
-		com.defines_signature <- Some s;
-		s
-
 let file_extension file =
 	match List.rev (ExtString.String.nsplit file ".") with
 	| e :: _ -> String.lowercase e
@@ -1198,22 +1272,25 @@ let mem_size v =
 (* ------------------------- TIMERS ----------------------------- *)
 
 type timer_infos = {
-	name : string;
+	id : string list;
 	mutable start : float list;
 	mutable total : float;
+	mutable calls : int;
 }
 
 let get_time = Extc.time
 let htimers = Hashtbl.create 0
 
-let new_timer name =
+let new_timer id =
+	let key = String.concat "." id in
 	try
-		let t = Hashtbl.find htimers name in
+		let t = Hashtbl.find htimers key in
 		t.start <- get_time() :: t.start;
+		t.calls <- t.calls + 1;
 		t
 	with Not_found ->
-		let t = { name = name; start = [get_time()]; total = 0.; } in
-		Hashtbl.add htimers name t;
+		let t = { id = id; start = [get_time()]; total = 0.; calls = 1; } in
+		Hashtbl.add htimers key t;
 		t
 
 let curtime = ref []
@@ -1228,15 +1305,15 @@ let close t =
 	t.total <- t.total +. dt;
 	let rec loop() =
 		match !curtime with
-		| [] -> failwith ("Timer " ^ t.name ^ " closed while not active")
+		| [] -> failwith ("Timer " ^ (String.concat "." t.id) ^ " closed while not active")
 		| tt :: l -> curtime := l; if t != tt then loop()
 	in
 	loop();
 	(* because of rounding errors while adding small times, we need to make sure that we don't have start > now *)
 	List.iter (fun ct -> ct.start <- List.map (fun t -> let s = t +. dt in if s > now then now else s) ct.start) !curtime
 
-let timer name =
-	let t = new_timer name in
+let timer id =
+	let t = new_timer id in
 	curtime := t :: !curtime;
 	(function() -> close t)
 
@@ -1279,3 +1356,16 @@ let float_repres f =
 let add_diagnostics_message com s p sev =
 	let di = com.shared.shared_display_information in
 	di.diagnostics_messages <- (s,p,sev) :: di.diagnostics_messages
+
+open Printer
+
+let dump_context com = s_record_fields "" [
+	"version",string_of_int com.version;
+	"args",s_list ", " (fun s -> s) com.args;
+	"debug",string_of_bool com.debug;
+	"platform",platform_name com.platform;
+	"std_path",s_list ", " (fun s -> s) com.std_path;
+	"class_path",s_list ", " (fun s -> s) com.class_path;
+	"defines",s_pmap (fun s -> s) (fun s -> s) com.defines;
+	"defines_signature",s_opt (fun s -> Digest.to_hex s) com.defines_signature;
+]
