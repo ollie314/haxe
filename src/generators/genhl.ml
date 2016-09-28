@@ -20,6 +20,7 @@
  * DEALINGS IN THE SOFTWARE.
  *)
 open Unix
+open Globals
 open Ast
 open Type
 open Common
@@ -37,6 +38,7 @@ type method_capture = {
 	c_map : (int, int) PMap.t;
 	c_vars : tvar array;
 	c_type : ttype;
+	c_group : bool;
 }
 
 type allocator = {
@@ -49,7 +51,7 @@ type method_context = {
 	mregs : (int, ttype) lookup;
 	mops : opcode DynArray.t;
 	mret : ttype;
-	mdebug : (int * int) DynArray.t;
+	mdebug : Globals.pos DynArray.t;
 	mvars : (int, tvar) Hashtbl.t;
 	mutable mallocs : (ttype, allocator) PMap.t;
 	mutable mcaptured : method_capture;
@@ -57,7 +59,7 @@ type method_context = {
 	mutable mbreaks : (int -> unit) list;
 	mutable mtrys : int;
 	mutable mcaptreg : int;
-	mutable mcurpos : (int * int);
+	mutable mcurpos : Globals.pos;
 }
 
 type array_impl = {
@@ -172,6 +174,7 @@ let null_capture =
 		c_vars = [||];
 		c_map = PMap.empty;
 		c_type = HVoid;
+		c_group = false;
 	}
 
 let lookup l v fb =
@@ -203,7 +206,7 @@ let method_context id t captured =
 		mtrys = 0;
 		mcaptreg = 0;
 		mdebug = DynArray.create();
-		mcurpos = (0,0);
+		mcurpos = Globals.null_pos;
 	}
 
 let field_name c f =
@@ -211,8 +214,6 @@ let field_name c f =
 
 let efield_name e f =
 	s_type_path e.e_path ^ ":" ^ f.ef_name
-
-let underscore_class_name c = match c.cl_path with [],s -> s | p,s -> String.concat "_" p ^ "_" ^ s
 
 let global_type ctx g =
 	DynArray.get ctx.cglobals.arr g
@@ -255,8 +256,19 @@ let rec unsigned t =
 	| TAbstract (a,pl) -> unsigned (Abstract.get_underlying_type a pl)
 	| _ -> false
 
+let unsigned_op e1 e2 =
+	let is_unsigned e =
+		match e.eexpr with
+		| TConst (TInt _) -> true
+		| _ -> unsigned e.etype
+	in
+	is_unsigned e1 && is_unsigned e2
+
 let set_curpos ctx p =
-	let get_relative_path() =
+	ctx.m.mcurpos <- p
+
+let make_debug ctx arr =
+	let get_relative_path p =
 		match Common.defined ctx.com Common.Define.AbsolutePath with
 		| true -> if (Filename.is_relative p.pfile)
 			then Filename.concat (Sys.getcwd()) p.pfile
@@ -273,7 +285,26 @@ let set_curpos ctx p =
 		with Not_found ->
 			p.pfile
 	in
-	ctx.m.mcurpos <- (lookup ctx.cdebug_files p.pfile get_relative_path,Lexer.get_error_line p)
+	let pos = ref (0,0) in
+	let cur_file = ref 0 in
+	let cur_line = ref 0 in
+	let cur = ref Globals.null_pos in
+	let out = Array.make (DynArray.length arr) !pos in
+	for i = 0 to DynArray.length arr - 1 do
+		let p = DynArray.unsafe_get arr i in
+		if p != !cur then begin
+			let file = if p.pfile == (!cur).pfile then !cur_file else lookup ctx.cdebug_files p.pfile (fun() -> get_relative_path p) in
+			let line = Lexer.get_error_line p in
+			if line <> !cur_line || file <> !cur_file then begin
+				cur_file := file;
+				cur_line := line;
+				pos := (file,line);
+			end;
+			cur := p;
+		end;
+		Array.unsafe_set out i !pos
+	done;
+	out
 
 let rec to_type ?tref ctx t =
 	match t with
@@ -699,8 +730,11 @@ let free ctx r =
 	if !last then a.a_all <- loop a.a_all
 
 let op ctx o =
-	DynArray.add ctx.m.mdebug ctx.m.mcurpos;
-	DynArray.add ctx.m.mops o
+	match o with
+	| OMov (a,b) when a = b -> ()
+	| _ ->
+		DynArray.add ctx.m.mdebug ctx.m.mcurpos;
+		DynArray.add ctx.m.mops o
 
 let jump ctx f =
 	let pos = current_pos ctx in
@@ -975,10 +1009,12 @@ and unsafe_cast_to ctx (r:reg) (t:ttype) p =
 		cast_to ctx r t p
 	| HDyn when is_array_type t ->
 		cast_to ctx r t p
-	| HDyn when (match t with HVirtual _ -> true | _ -> false) ->
+	| (HDyn | HObj _) when (match t with HVirtual _ -> true | _ -> false) ->
 		cast_to ctx r t p
 	| HObj _ when is_array_type rt && is_array_type t ->
 		cast_to ctx r t p
+	| HVirtual _ when (match t with HObj _ | HVirtual _ -> true | _ -> false) ->
+		cast_to ~force:true ctx r t p
 	| _ ->
 		if is_dynamic (rtype ctx r) && is_dynamic t then
 			let r2 = alloc_tmp ctx t in
@@ -1012,6 +1048,18 @@ and object_access ctx eobj t f =
 	| _ ->
 		abort ("Unsupported field access " ^ tstr t) eobj.epos
 
+and direct_method_call ctx c f ethis =
+	if (match f.cf_kind with Method m -> m = MethDynamic | Var _ -> true) then
+		false
+	else if c.cl_interface then
+		false
+	else if (match c.cl_kind with KTypeParameter _ ->  true | _ -> false) then
+		false
+	else if is_overriden ctx c f && ethis.eexpr <> TConst(TSuper) then
+		false
+	else
+		true
+
 and get_access ctx e =
 	match e.eexpr with
 	| TField (ethis, a) ->
@@ -1021,8 +1069,8 @@ and get_access ctx e =
 			AStaticVar (g, t, (match t with HObj o -> (try fst (get_index f.cf_name o) with Not_found -> assert false) | _ -> assert false))
 		| FStatic (c,({ cf_kind = Method _ } as f)), _ ->
 			AStaticFun (alloc_fid ctx c f)
-		| FClosure (Some (cdef,pl), ({ cf_kind = Method m } as f)), TInst (c,_)
-		| FInstance (cdef,pl,({ cf_kind = Method m } as f)), TInst (c,_) when m <> MethDynamic && not (c.cl_interface || (is_overriden ctx c f && ethis.eexpr <> TConst(TSuper))) ->
+		| FClosure (Some (cdef,pl), f), TInst (c,_)
+		| FInstance (cdef,pl,f), TInst (c,_) when direct_method_call ctx c f ethis ->
 			(* cdef is the original definition, we want the last redefinition *)
 			let rec loop c =
 				if PMap.mem f.cf_name c.cl_fields then c else (match c.cl_super with None -> cdef | Some (c,_) -> loop c)
@@ -1047,22 +1095,26 @@ and get_access ctx e =
 	| TParenthesis e ->
 		get_access ctx e
 	| TArray (a,i) ->
-		(match follow a.etype with
-		| TInst({ cl_path = [],"Array" },[t]) ->
-			let a = eval_null_check ctx a in
-			hold ctx a;
-			let i = eval_to ctx i HI32 in
-			free ctx a;
-			let t = to_type ctx t in
-			AArray (a,(t,t),i)
-		| _ ->
-			let a = eval_to ctx a (class_type ctx ctx.array_impl.adyn [] false) in
-			op ctx (ONullCheck a);
-			hold ctx a;
-			let i = eval_to ctx i HI32 in
-			free ctx a;
-			AArray (a,(HDyn,to_type ctx e.etype),i)
-		)
+		let rec loop t =
+			match follow t with
+			| TInst({ cl_path = [],"Array" },[t]) ->
+				let a = eval_null_check ctx a in
+				hold ctx a;
+				let i = eval_to ctx i HI32 in
+				free ctx a;
+				let t = to_type ctx t in
+				AArray (a,(t,t),i)
+			| TAbstract (a,pl) ->
+				loop (Abstract.get_underlying_type a pl)
+			| _ ->
+				let a = eval_to ctx a (class_type ctx ctx.array_impl.adyn [] false) in
+				op ctx (ONullCheck a);
+				hold ctx a;
+				let i = eval_to ctx i HI32 in
+				free ctx a;
+				AArray (a,(HDyn,to_type ctx e.etype),i)
+		in
+		loop a.etype
 	| _ ->
 		ANone
 
@@ -1132,7 +1184,7 @@ and jump_expr ctx e jcond =
 		hold ctx r1;
 		let r2 = eval_to ctx e2 t in
 		free ctx r1;
-		let unsigned = unsigned e1.etype && unsigned e2.etype in
+		let unsigned = unsigned_op e1 e2 in
 		jump ctx (fun i ->
 			let lt a b = if unsigned then OJULt (a,b,i) else OJSLt (a,b,i) in
 			let gte a b = if unsigned then OJUGte (a,b,i) else OJSGte (a,b,i) in
@@ -1185,6 +1237,14 @@ and make_string ctx s p =
 	op ctx (OSetField (s,0,r));
 	op ctx (OSetField (s,1,reg_int ctx len));
 	s
+
+and eval_var ctx v =
+	match captured_index ctx v with
+	| None -> alloc_reg ctx v false
+	| Some idx ->
+		let r = alloc_tmp ctx (to_type ctx v.v_type) in
+		op ctx (OEnumField (r,ctx.m.mcaptreg,0,idx));
+		r
 
 and eval_expr ctx e =
 	set_curpos ctx e.epos;
@@ -1287,7 +1347,7 @@ and eval_expr ctx e =
 			hold ctx r1;
 			let r2 = eval_to ctx e2 HI32 in
 			free ctx r1;
-			op ctx (if unsigned e1.etype && unsigned e2.etype then OUDiv (tmp,r1,r2) else OSDiv (tmp, r1, r2));
+			op ctx (if unsigned_op e1 e2 then OUDiv (tmp,r1,r2) else OSDiv (tmp, r1, r2));
 			tmp
 		| "$int", [e] ->
 			let tmp = alloc_tmp ctx HI32 in
@@ -1786,7 +1846,7 @@ and eval_expr ctx e =
 			jexit());
 		out
 	| TBinop (bop, e1, e2) ->
-		let is_unsigned() = unsigned e1.etype && unsigned e2.etype in
+		let is_unsigned() = unsigned_op e1 e2 in
 		let boolop r f =
 			let j = jump ctx f in
 			op ctx (OBool (r,false));
@@ -1819,7 +1879,7 @@ and eval_expr ctx e =
 						(match bop with
 						| OpSub -> op ctx (OSub (r,a,b))
 						| OpMult -> op ctx (OMul (r,a,b))
-						| OpMod -> op ctx (if is_unsigned() then OUMod (r,a,b) else OSMod (r,a,b))
+						| OpMod -> op ctx (if unsigned e1.etype then OUMod (r,a,b) else OSMod (r,a,b))
 						| OpDiv -> op ctx (OSDiv (r,a,b)) (* don't use UDiv since both operands are float already *)
 						| _ -> assert false)
 					| _ ->
@@ -2063,24 +2123,18 @@ and eval_expr ctx e =
 		let r = alloc_tmp ctx (to_type ctx e.etype) in
 		if capt == ctx.m.mcaptured then
 			op ctx (OInstanceClosure (r, fid, ctx.m.mcaptreg))
-		else if Array.length capt.c_vars > 0 then
+		else (match Array.length capt.c_vars with
+		| 0 ->
+			op ctx (OStaticClosure (r, fid))
+		| 1 when not capt.c_group ->
+			op ctx (OInstanceClosure (r, fid, eval_var ctx capt.c_vars.(0)))
+		| _ ->
 			let env = alloc_tmp ctx capt.c_type in
 			op ctx (OEnumAlloc (env,0));
 			hold ctx env;
-			Array.iteri (fun i v ->
-				let r = (match captured_index ctx v with
-				| None -> alloc_reg ctx v false
-				| Some idx ->
-					let r = alloc_tmp ctx (to_type ctx v.v_type) in
-					op ctx (OEnumField (r,ctx.m.mcaptreg,0,idx));
-					r
-				) in
-				op ctx (OSetEnumField (env,i,r));
-			) capt.c_vars;
+			Array.iteri (fun i v -> op ctx (OSetEnumField (env,i,eval_var ctx v))) capt.c_vars;
 			free ctx env;
-			op ctx (OInstanceClosure (r, fid, env))
-		else
-			op ctx (OStaticClosure (r, fid));
+			op ctx (OInstanceClosure (r, fid, env)));
 		r
 	| TThrow v ->
 		op ctx (OThrow (eval_to ctx v HDyn));
@@ -2124,6 +2178,11 @@ and eval_expr ctx e =
 		| HF32 | HF64 when unsigned v.etype ->
 			let r = alloc_tmp ctx t in
 			op ctx (OToUFloat (r,rv));
+			r
+		| HDyn when (match rtype ctx rv with HFun _ -> true | _ -> false) ->
+			(* if called, a HDyn method will return HDyn, not its usual return type *)
+			let r = alloc_tmp ctx t in
+			op ctx (OMov (r,rv));
 			r
 		| _ ->
 			cast_to ~force:true ctx rv t e.epos)
@@ -2474,23 +2533,33 @@ and build_capture_vars ctx f =
 	let cvars = Array.of_list (PMap.fold (fun v acc -> if PMap.mem v.v_id !ignored_vars then acc else v :: acc) !used_vars []) in
 	Array.sort (fun v1 v2 -> v1.v_id - v2.v_id) cvars;
 	let indexes = ref PMap.empty in
-	Array.iteri (fun i v -> indexes := PMap.add v.v_id i !indexes) cvars;
-	let ctypes = Array.map (fun v -> to_type ctx v.v_type) cvars in
-	let ltypes = Array.to_list ctypes in
-	let ct = try PMap.find ltypes ctx.captured_cache with Not_found ->
-		let ct = HEnum {
-			eglobal = None;
-			ename = "";
-			eid = 0;
-			efields = [|"",0,ctypes|];
-		} in
-		ctx.captured_cache <- PMap.add ltypes ct ctx.captured_cache;
-		ct
-	in
+	let v0t = (if Array.length cvars = 1 then to_type ctx cvars.(0).v_type else HDyn) in
+	let ct, group = (match Array.length cvars with
+		| 0 -> HVoid, false
+		| 1 when is_nullable v0t -> v0t, false
+		| _ ->
+			Array.iteri (fun i v -> indexes := PMap.add v.v_id i !indexes) cvars;
+			let ctypes = Array.map (fun v -> to_type ctx v.v_type) cvars in
+			let ltypes = Array.to_list ctypes in
+			let ct = (try
+				PMap.find ltypes ctx.captured_cache
+			with Not_found ->
+				let ct = HEnum {
+					eglobal = None;
+					ename = "";
+					eid = 0;
+					efields = [|"",0,ctypes|];
+				} in
+				ctx.captured_cache <- PMap.add ltypes ct ctx.captured_cache;
+				ct
+			) in
+			ct, true
+	) in
 	{
 		c_map = !indexes;
 		c_vars = cvars;
-		c_type = ct
+		c_type = ct;
+		c_group = group;
 	}
 
 and gen_method_wrapper ctx rt t p =
@@ -2515,12 +2584,12 @@ and gen_method_wrapper ctx rt t p =
 		op ctx (OCallClosure (rret,rfun,casts));
 		op ctx (ORet (cast_to ctx rret tret p));
 		let f = {
-			name = "","";
+			fpath = "","";
 			findex = fid;
 			ftype = HFun (rt :: targs, tret);
 			regs = DynArray.to_array ctx.m.mregs.arr;
 			code = DynArray.to_array ctx.m.mops;
-			debug = DynArray.to_array ctx.m.mdebug;
+			debug = make_debug ctx ctx.m.mdebug;
 		} in
 		ctx.m <- old;
 		DynArray.add ctx.cfunctions f;
@@ -2547,7 +2616,16 @@ and make_fun ?gen_content ctx name fidx f cthis cparent =
 		Some t
 	) in
 
-	let rcapt = if has_captured_vars && cparent <> None then Some (let r = alloc_tmp ctx capt.c_type in hold ctx r; r) else None in
+	let rcapt = match has_captured_vars && cparent <> None with
+		| true when capt.c_group ->
+			let r = alloc_tmp ctx capt.c_type in
+			hold ctx r;
+			Some r
+		| true ->
+			Some (alloc_reg ctx capt.c_vars.(0) true)
+		| false ->
+			None
+	in
 
 	let args = List.map (fun (v,o) ->
 		let r = alloc_reg ctx (if o = None then v else { v with v_type = ctx.com.basic.tnull v.v_type }) true in
@@ -2555,6 +2633,8 @@ and make_fun ?gen_content ctx name fidx f cthis cparent =
 	) f.tf_args in
 
 	if has_captured_vars then ctx.m.mcaptreg <- (match rcapt with
+		| None when not capt.c_group ->
+			-1
 		| None ->
 			let r = alloc_tmp ctx capt.c_type in
 			hold ctx r;
@@ -2643,16 +2723,16 @@ and make_fun ?gen_content ctx name fidx f cthis cparent =
 	end;
 	let fargs = (match tthis with None -> [] | Some t -> [t]) @ (match rcapt with None -> [] | Some r -> [rtype ctx r]) @ args in
 	let f = {
-		name = name;
+		fpath = name;
 		findex = fidx;
 		ftype = HFun (fargs, tret);
 		regs = DynArray.to_array ctx.m.mregs.arr;
 		code = DynArray.to_array ctx.m.mops;
-		debug = DynArray.to_array ctx.m.mdebug;
+		debug = make_debug ctx ctx.m.mdebug;
 	} in
 	ctx.m <- old;
 	Hashtbl.add ctx.defined_funs fidx ();
-	let f = if ctx.optimize then Hlopt.optimize ctx.dump_out f else f in
+	(*let f = if ctx.optimize then Hlopt.optimize ctx.dump_out f else f in*)
 	DynArray.add ctx.cfunctions f;
 	capt
 
@@ -2678,7 +2758,7 @@ let generate_static ctx c f =
 			| (Meta.Custom ":hlNative",_ ,p) :: _ ->
 				abort "Invalid @:hlNative decl" p
 			| [] ->
-				ignore(make_fun ctx ((underscore_class_name c),f.cf_name) (alloc_fid ctx c f) (match f.cf_expr with Some { eexpr = TFunction f } -> f | _ -> assert false) None None)
+				ignore(make_fun ctx (s_type_path c.cl_path,f.cf_name) (alloc_fid ctx c f) (match f.cf_expr with Some { eexpr = TFunction f } -> f | _ -> assert false) None None)
 			| _ :: l ->
 				loop l
 		in
@@ -2708,7 +2788,7 @@ let rec generate_member ctx c f =
 				| _ -> ()
 			) c.cl_ordered_fields;
 		) in
-		ignore(make_fun ?gen_content ctx (underscore_class_name c,f.cf_name) (alloc_fid ctx c f) (match f.cf_expr with Some { eexpr = TFunction f } -> f | _ -> abort "Missing function body" f.cf_pos) (Some c) None);
+		ignore(make_fun ?gen_content ctx (s_type_path c.cl_path,f.cf_name) (alloc_fid ctx c f) (match f.cf_expr with Some { eexpr = TFunction f } -> f | _ -> abort "Missing function body" f.cf_pos) (Some c) None);
 		if f.cf_name = "toString" && not (List.memq f c.cl_overrides) && not (PMap.mem "__string" c.cl_fields) && is_to_string f.cf_type then begin
 			let p = f.cf_pos in
 			(* function __string() return this.toString().bytes *)
@@ -2716,7 +2796,7 @@ let rec generate_member ctx c f =
 			let tstr = mk (TCall (mk (TField (ethis,FInstance(c,List.map snd c.cl_params,f))) f.cf_type p,[])) ctx.com.basic.tstring p in
 			let cstr, cf_bytes = (try (match ctx.com.basic.tstring with TInst(c,_) -> c, PMap.find "bytes" c.cl_fields | _ -> assert false) with Not_found -> assert false) in
 			let estr = mk (TReturn (Some (mk (TField (tstr,FInstance (cstr,[],cf_bytes))) cf_bytes.cf_type p))) ctx.com.basic.tvoid p in
-			ignore(make_fun ctx (underscore_class_name c,"__string") (alloc_fun_path ctx c.cl_path "__string") { tf_expr = estr; tf_args = []; tf_type = cf_bytes.cf_type; } (Some c) None)
+			ignore(make_fun ctx (s_type_path c.cl_path,"__string") (alloc_fun_path ctx c.cl_path "__string") { tf_expr = estr; tf_args = []; tf_type = cf_bytes.cf_type; } (Some c) None)
 		end
 
 let generate_type ctx t =
@@ -2782,14 +2862,7 @@ let generate_static_init ctx =
 
 				(match c.cl_constructor with
 				| None -> ()
-				| Some f ->
-					(* set __constructor__ *)
-					let r = alloc_tmp ctx (match to_type ctx f.cf_type with
-						| HFun (args,ret) -> HFun (class_type ctx c (List.map snd c.cl_params) false :: args, ret)
-						| _ -> assert false
-					) in
-					op ctx (OStaticClosure (r, alloc_fid ctx c f));
-					op ctx (OSetField (rc,index "__constructor__",r)));
+				| Some f -> op ctx (OSetMethod (rc,index "__constructor__",alloc_fid ctx c f)));
 
 				let gather_implements() =
 					let classes = ref [] in
@@ -2821,9 +2894,7 @@ let generate_static_init ctx =
 				List.iter (fun f ->
 					match f.cf_kind with
 					| Method _ when not (is_extern_field f) ->
-						let cl = alloc_tmp ctx (to_type ctx f.cf_type) in
-						op ctx (OStaticClosure (cl, alloc_fid ctx c f));
-						op ctx (OSetField (rc,index f.cf_name,cl));
+						op ctx (OSetMethod (rc,index f.cf_name,alloc_fid ctx c f));
 					| _ ->
 						()
 				) c.cl_ordered_statics;
@@ -3360,4 +3431,4 @@ let generate com =
 		close_out ch;
 	end;
 	t();
-	if Common.defined com Define.Interp then try ignore(Hlinterp.interp code) with Failure msg -> abort msg Ast.null_pos
+	if Common.defined com Define.Interp then try ignore(Hlinterp.interp code) with Failure msg -> abort msg null_pos

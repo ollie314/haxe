@@ -226,7 +226,7 @@ let write_c version file (code:code) =
 	Array.iter (fun f ->
 		Array.iteri (fun i op ->
 			match op with
-			| OStaticClosure (_,fid) ->
+			| OStaticClosure (_,fid) | OSetMethod (_,_,fid) ->
 				Hashtbl.replace used_closures fid ()
 			| OBytes (_,sid) ->
 				Hashtbl.replace bytes_strings sid ()
@@ -325,9 +325,10 @@ let write_c version file (code:code) =
 	Array.iter (fun f ->
 		match f.ftype with
 		| HFun (args,t) ->
-			sexpr "static %s %s(%s)" (ctype t) (fundecl_name f) (String.concat "," (List.map ctype args));
+			let fname = String.concat "_" (ExtString.String.nsplit (fundecl_name f) ".") in
+			sexpr "static %s %s(%s)" (ctype t) fname (String.concat "," (List.map ctype args));
 			Array.set tfuns f.findex (args,t);
-			funnames.(f.findex) <- fundecl_name f;
+			funnames.(f.findex) <- fname;
 		| _ ->
 			assert false
 	) code.functions;
@@ -709,7 +710,7 @@ let write_c version file (code:code) =
 
 		let fret = (match f.ftype with
 		| HFun (args,t) ->
-			sline "static %s %s(%s) {" (ctype t) (fundecl_name f) (String.concat "," (List.map (fun t -> incr rid; var_type (reg !rid) t) args));
+			sline "static %s %s(%s) {" (ctype t) funnames.(f.findex) (String.concat "," (List.map (fun t -> incr rid; var_type (reg !rid) t) args));
 			t
 		| _ ->
 			assert false
@@ -773,7 +774,7 @@ let write_c version file (code:code) =
 			let todo() =
 				sexpr "hl_fatal(\"%s\")" (ostr (fun id -> "f" ^ string_of_int id) op)
 			in
-			let compare_op op a b d =
+			let rec compare_op op a b d =
 				let phys_compare() =
 					sexpr "if( %s %s %s ) goto %s" (reg a) (s_comp op) (rcast b (rtype a)) (label d)
 				in
@@ -810,22 +811,24 @@ let write_c version file (code:code) =
 							sexpr "if( %s && %s && %s(%s,%s) %s 0 ) goto %s" (reg a) (reg b) funnames.(fid) (reg a) (reg b) (s_comp op) (label d)
 					with Not_found ->
 						phys_compare())
-				| HEnum _, HEnum _ | HVirtual _, HVirtual _ | HDynObj, HDynObj ->
+				| HVirtual _, HVirtual _ ->
+					if op = CEq then
+						sexpr "if( %s == %s || (%s && %s && %s->value && %s->value && %s->value == %s->value) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg a) (reg b) (reg a) (reg b) (label d)
+					else if op = CNeq then
+						sexpr "if( %s != %s && (!%s || !%s || !%s->value || !%s->value || %s->value != %s->value) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg a) (reg b) (reg a) (reg b) (label d)
+					else
+						assert false
+				| HEnum _, HEnum _ | HDynObj, HDynObj ->
 					phys_compare()
 				| HVirtual _, HObj _->
 					if op = CEq then
-						sexpr "if( (void*)%s == (void*)%s || (%s && %s && %s->value == (vdynamic*)%s) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg a) (reg b) (label d)
+						sexpr "if( %s ? (%s && %s->value == (vdynamic*)%s) : (%s == NULL) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg b) (label d)
 					else if op = CNeq then
-						sexpr "if( (void*)%s != (void*)%s && (!%s || !%s || %s->value != (vdynamic*)%s) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg a) (reg b) (label d)
+						sexpr "if( %s ? (%s == NULL || %s->value != (vdynamic*)%s) : (%s != NULL) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg b) (label d)
 					else
 						assert false
 				| HObj _, HVirtual _ ->
-					if op = CEq then
-						sexpr "if( (void*)%s == (void*)%s || (%s && %s && %s->value == (vdynamic*)%s) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg b) (reg a) (label d)
-					else if op = CNeq then
-						sexpr "if( (void*)%s != (void*)%s && (!%s || !%s || %s->value != (vdynamic*)%s) ) goto %s" (reg a) (reg b) (reg a) (reg b) (reg b) (reg a) (label d)
-					else
-						assert false
+					compare_op op b a d
 				| HFun _, HFun _ ->
 					phys_compare()
 				| ta, tb ->
@@ -922,6 +925,9 @@ let write_c version file (code:code) =
 					assert false)
 			| OStaticClosure (r,fid) ->
 				sexpr "%s = &cl$%d" (reg r) fid
+			| OSetMethod (o,f,fid) ->
+				let name, t = resolve_field (match rtype o with HObj o -> o | _ -> assert false) f in
+				sexpr "%s->%s = (%s)&cl$%d" (reg o) (ident name) (ctype t) fid
 			| OInstanceClosure (r,fid,ptr) ->
 				let args, t = tfuns.(fid) in
 				sexpr "%s = hl_alloc_closure_ptr(%s,%s,%s)" (reg r) (type_value (HFun (args,t))) funnames.(fid) (reg ptr)

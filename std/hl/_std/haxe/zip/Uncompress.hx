@@ -21,7 +21,7 @@
  */
 package haxe.zip;
 
-private typedef Inflater = hl.types.NativeAbstract<"fmt_inflater">;
+private typedef Inflater = hl.types.NativeAbstract<"fmt_zip">;
 
 @:coreApi @:hlNative("fmt")
 class Uncompress {
@@ -39,11 +39,11 @@ class Uncompress {
 	}
 
 	public function setFlushMode( f : FlushMode ) : Void {
-		inflate_flush_mode(s,f.getIndex());
+		zip_flush_mode(s,f.getIndex());
 	}
 
 	public function close() : Void {
-		inflate_end(s);
+		zip_end(s);
 	}
 
 	public static function run( src : haxe.io.Bytes, ?bufsize : Int ) : haxe.io.Bytes {
@@ -68,7 +68,7 @@ class Uncompress {
 	static function inflate_buffer( i : Inflater, bytes : hl.types.Bytes, bytesPos : Int, bytesLen : Int, dst : hl.types.Bytes, dstPos : Int, dstLen : Int, read : hl.types.Ref<Int>, write : hl.types.Ref<Int>) : Bool {
 		return false;
 	}
-	static function inflate_end( i : Inflater ) : Void { }
-	static function inflate_flush_mode( i : Inflater, flush : Int ) : Void {}
+	static function zip_end( i : Inflater ) : Void { }
+	static function zip_flush_mode( i : Inflater, flush : Int ) : Void {}
 
 }

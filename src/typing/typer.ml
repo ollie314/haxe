@@ -23,6 +23,7 @@ open Common
 open Type
 open Typecore
 open Error
+open Globals
 
 (* ---------------------------------------------------------------------- *)
 (* TOOLS *)
@@ -582,7 +583,7 @@ let rec unify_call_args' ctx el args r callp inline force_inline =
 		try
 			let e = type_expr ctx e (WithType t) in
 			AbstractCast.cast_or_unify_raise ctx t e e.epos
-		with Error(l,p) when (match l with Call_error _ -> false | _ -> true) ->
+		with Error(l,p) when (match l with Call_error _ | Module_not_found _ -> false | _ -> true) ->
 			raise (WithTypeError (l,p))
 	in
 	let rec loop el args = match el,args with
@@ -4759,7 +4760,7 @@ let make_macro_api ctx p =
 				let _, tdef, pos = (try Interp.decode_type_def v with Interp.Invalid_expr -> Interp.exc (Interp.VString "Invalid type definition")) in
 				tdef, pos
 			) types in
-			let pos = (match types with [] -> Ast.null_pos | (_,p) :: _ -> p) in
+			let pos = (match types with [] -> null_pos | (_,p) :: _ -> p) in
 			let imports = List.map (fun (il,ik) -> EImport(il,ik),pos) imports in
 			let usings = List.map (fun tp ->
 				let sl = tp.tpackage @ [tp.tname] @ (match tp.tsub with None -> [] | Some s -> [s]) in
@@ -4813,10 +4814,24 @@ let make_macro_api ctx p =
 				ctx.g.global_metadata <- (ExtString.String.nsplit s1 ".",m,config) :: ctx.g.global_metadata;
 			) meta;
 		);
+		Interp.add_module_check_policy = (fun sl il b i ->
+			let add ctx =
+				ctx.g.module_check_policies <- (List.fold_left (fun acc s -> (ExtString.String.nsplit s ".",List.map Obj.magic il,b) :: acc) ctx.g.module_check_policies sl);
+				Hashtbl.iter (fun _ m -> m.m_extra.m_check_policy <- Typeload.get_policy ctx m.m_path) ctx.g.modules;
+			in
+			let add_macro ctx = match ctx.g.macros with
+				| None -> ()
+				| Some(_,mctx) -> add mctx;
+			in
+			match Obj.magic i with
+			| CompilationServer.NormalContext -> add ctx
+			| CompilationServer.MacroContext -> add_macro ctx
+			| CompilationServer.NormalAndMacroContext -> add ctx; add_macro ctx;
+		);
 	}
 
 let rec init_macro_interp ctx mctx mint =
-	let p = Ast.null_pos in
+	let p = null_pos in
 	ignore(Typeload.load_module mctx (["haxe";"macro"],"Expr") p);
 	ignore(Typeload.load_module mctx (["haxe";"macro"],"Type") p);
 	flush_macro_context mint ctx;
@@ -4870,10 +4885,10 @@ let create_macro_interp ctx mctx =
 	let com2 = mctx.com in
 	let mint, init = (match !macro_interp_cache with
 		| None ->
-			let mint = Interp.create com2 (make_macro_api ctx Ast.null_pos) in
+			let mint = Interp.create com2 (make_macro_api ctx null_pos) in
 			mint, (fun() -> init_macro_interp ctx mctx mint)
 		| Some mint ->
-			Interp.do_reuse mint (make_macro_api ctx Ast.null_pos);
+			Interp.do_reuse mint (make_macro_api ctx null_pos);
 			mint, (fun() -> ())
 	) in
 	let on_error = com2.error in
@@ -4900,7 +4915,7 @@ let get_macro_context ctx p =
 		com2.package_rules <- PMap.empty;
 		com2.main_class <- None;
 		com2.display <- DisplayMode.create DMNone;
-		List.iter (fun p -> com2.defines <- PMap.remove (platform_name p) com2.defines) platforms;
+		List.iter (fun p -> com2.defines <- PMap.remove (Globals.platform_name p) com2.defines) Globals.platforms;
 		com2.defines_signature <- None;
 		com2.class_path <- List.filter (fun s -> not (ExtString.String.exists s "/_std/")) com2.class_path;
 		com2.class_path <- List.map (fun p -> p ^ "neko" ^ "/_std/") com2.std_path @ com2.class_path;
@@ -4915,7 +4930,7 @@ let get_macro_context ctx p =
 		api, mctx
 
 let load_macro ctx display cpath f p =
-	let t = macro_timer ctx ["typing";Ast.s_type_path cpath ^ "." ^ f] in
+	let t = macro_timer ctx ["typing";s_type_path cpath ^ "." ^ f] in
 	let api, mctx = get_macro_context ctx p in
 	let mint = Interp.get_ctx() in
 	let cpath, sub = (match List.rev (fst cpath) with
@@ -4946,6 +4961,8 @@ let load_macro ctx display cpath f p =
 				c, (try PMap.find f c.cl_statics with Not_found -> error ("Method " ^ f ^ " not found on class " ^ s_type_path cpath) p)
 			| _ -> error "Macro should be called on a class" p
 		) in
+		if not (Common.defined ctx.com Define.NoDeprecationWarnings) then
+			Display.DeprecationCheck.check_cf mctx.com meth p;
 		let meth = (match follow meth.cf_type with TFun (args,ret) -> args,ret,cl,meth | _ -> error "Macro call should be a method" p) in
 		mctx.com.display <- DisplayMode.create DMNone;
 		if not ctx.in_macro then flush_macro_context mint ctx;
@@ -5181,6 +5198,7 @@ let call_init_macro ctx e =
 		in
 		let path, meth = (match loop e with
 		| [meth] -> (["haxe";"macro"],"Compiler"), meth
+		| [meth;"server"] -> (["haxe";"macro"],"CompilationServer"), meth
 		| meth :: cl :: path -> (List.rev path,cl), meth
 		| _ -> error "Invalid macro call" p) in
 		ignore(call_macro ctx path meth args p);
@@ -5201,6 +5219,7 @@ let rec create com =
 			types_module = Hashtbl.create 0;
 			type_patches = Hashtbl.create 0;
 			global_metadata = [];
+			module_check_policies = [];
 			delayed = [];
 			debug_delayed = [];
 			delayed_macros = DynArray.create();

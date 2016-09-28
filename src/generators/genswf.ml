@@ -24,6 +24,7 @@ open Genswf9
 open Type
 open Common
 open Ast
+open Globals
 
 let rec make_tpath = function
 	| HMPath (pack,name) ->
@@ -109,7 +110,7 @@ let is_valid_path com pack name =
 		| [] ->
 			false
 		| load :: l ->
-			match load (pack,name) Ast.null_pos with
+			match load (pack,name) null_pos with
 			| None -> loop l
 			| Some (file,(_,a)) -> true
 	in
@@ -196,7 +197,7 @@ let build_class com c file =
 		match f.hlf_kind with
 		| HFVar v ->
 			if v.hlv_const then
-				cf.cff_kind <- FProp ("default","never",Some (make_type v.hlv_type,null_pos),None)
+				cf.cff_kind <- FProp (("default",null_pos),("never",null_pos),Some (make_type v.hlv_type,null_pos),None)
 			else
 				cf.cff_kind <- FVar (Some (make_dyn_type v.hlv_type,null_pos),None);
 			cf :: acc
@@ -301,7 +302,7 @@ let build_class com c file =
 			cff_doc = None;
 			cff_access = flags;
 			cff_meta = [];
-			cff_kind = if get && set then FVar (Some (make_dyn_type t,null_pos), None) else FProp ((if get then "default" else "never"),(if set then "default" else "never"),Some (make_dyn_type t,null_pos),None);
+			cff_kind = if get && set then FVar (Some (make_dyn_type t,null_pos), None) else FProp (((if get then "default" else "never"),null_pos),((if set then "default" else "never"),null_pos),Some (make_dyn_type t,null_pos),None);
 		}
 	in
 	let fields = Hashtbl.fold (fun (name,stat) t acc ->
@@ -324,7 +325,7 @@ let build_class com c file =
 			| f :: l ->
 				match f.cff_kind with
 				| FVar (Some (CTPath { tpackage = []; tname = ("String" | "Int" | "UInt") as tname },null_pos),None)
-				| FProp ("default","never",Some (CTPath { tpackage = []; tname = ("String" | "Int" | "UInt") as tname },null_pos),None) when List.mem AStatic f.cff_access ->
+				| FProp (("default",_),("never",_),Some (CTPath { tpackage = []; tname = ("String" | "Int" | "UInt") as tname },null_pos),None) when List.mem AStatic f.cff_access ->
 					if !real_type = "" then real_type := tname else if !real_type <> tname then raise Exit;
 					{
 						ec_name = f.cff_name;
@@ -1140,7 +1141,7 @@ let generate swf_header com =
 	let fattr = if Common.defined com Define.AdvancedTelemetry then fattr @ [tag (TUnknown (0x5D,"\x00\x00"))] else fattr in
 	let swf_script_limits = try
 		let s = Common.defined_value com Define.SwfScriptTimeout in
-		let i = try int_of_string s with _ -> abort "Argument to swf_script_timeout must be an integer" Ast.null_pos in
+		let i = try int_of_string s with _ -> abort "Argument to swf_script_timeout must be an integer" null_pos in
 		[tag(TScriptLimits (256, if i < 0 then 0 else if i > 65535 then 65535 else i))]
 	with Not_found ->
 		[]

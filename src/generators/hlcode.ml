@@ -132,6 +132,7 @@ type opcode =
 	| OSetThis of field index * reg
 	| ODynGet of reg * reg * string index
 	| ODynSet of reg * string index * reg
+	| OSetMethod of reg * field index * functable index (* init static method *)
 	(* jumps *)
 	| OJTrue of reg * int
 	| OJFalse of reg * int
@@ -196,7 +197,7 @@ type opcode =
 	| ODump of reg
 
 type fundecl = {
-	name : string * string;
+	fpath : string * string;
 	findex : functable index;
 	ftype : ttype;
 	regs : ttype array;
@@ -496,6 +497,7 @@ let ostr fstr o =
 	| OCallThis (r,f,rl) -> Printf.sprintf "callthis %d, [%d](%s)" r f (String.concat "," (List.map string_of_int rl))
 	| OStaticClosure (r,f) -> Printf.sprintf "staticclosure %d, %s" r (fstr f)
 	| OInstanceClosure (r,f,v) -> Printf.sprintf "instanceclosure %d, %s(%d)" r (fstr f) v
+	| OSetMethod (o,f,fid) -> Printf.sprintf "setmethod %d[%d], %d" o f fid
 	| OGetGlobal (r,g) -> Printf.sprintf "global %d, %d" r g
 	| OSetGlobal (g,r) -> Printf.sprintf "setglobal %d, %d" g r
 	| ORet r -> Printf.sprintf "ret %d" r
@@ -560,7 +562,7 @@ let ostr fstr o =
 	| OEndTrap b -> Printf.sprintf "endtrap %b" b
 	| ODump r -> Printf.sprintf "dump %d" r
 
-let fundecl_name f = if snd f.name = "" then "fun$" ^ (string_of_int f.findex) else (fst f.name) ^ "_" ^ (snd f.name)
+let fundecl_name f = if snd f.fpath = "" then "fun$" ^ (string_of_int f.findex) else (fst f.fpath) ^ "." ^ (snd f.fpath)
 
 let dump pr code =
 	let all_protos = Hashtbl.create 0 in

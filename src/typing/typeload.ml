@@ -23,6 +23,7 @@ open Common.DisplayMode
 open Type
 open Typecore
 open Error
+open Globals
 
 exception Build_canceled of build_state
 
@@ -32,7 +33,7 @@ let transform_abstract_field com this_t a_t a f =
 	let stat = List.mem AStatic f.cff_access in
 	let p = f.cff_pos in
 	match f.cff_kind with
-	| FProp (("get" | "never"),("set" | "never"),_,_) when not stat ->
+	| FProp ((("get" | "never"),_),(("set" | "never"),_),_,_) when not stat ->
 		(* TODO: hack to avoid issues with abstract property generation on As3 *)
 		if Common.defined com Define.As3 then f.cff_meta <- (Meta.Extern,[],null_pos) :: f.cff_meta;
 		{ f with cff_access = AStatic :: f.cff_access; cff_meta = (Meta.Impl,[],null_pos) :: f.cff_meta }
@@ -69,12 +70,16 @@ let transform_abstract_field com this_t a_t a f =
 	| _ ->
 		f
 
+let get_policy ctx mpath =
+	let sl1 = full_dot_path mpath mpath in
+	List.fold_left (fun acc (sl2,policy,recursive) -> if match_path recursive sl1 sl2 then policy @ acc else acc) [] ctx.g.module_check_policies
+
 let make_module ctx mpath file loadp =
 	let m = {
 		m_id = alloc_mid();
 		m_path = mpath;
 		m_types = [];
-		m_extra = module_extra (Path.unique_full_path file) (Common.get_signature ctx.com) (file_time file) (if ctx.in_macro then MMacro else MCode);
+		m_extra = module_extra (Path.unique_full_path file) (Common.get_signature ctx.com) (file_time file) (if ctx.in_macro then MMacro else MCode) (get_policy ctx mpath);
 	} in
 	m
 
@@ -626,7 +631,7 @@ and load_complex_type ctx allow_display p (t,pn) =
 					t
 				| FProp (i1,i2,t,e) ->
 					no_expr e;
-					let access m get =
+					let access (m,_) get =
 						match m with
 						| "null" -> AccNo
 						| "never" -> AccNever
@@ -813,7 +818,7 @@ let valid_redefinition ctx f1 t1 f2 t2 = (* child, parent *)
 					| _ ->
 						raise (Unify_error [Unify_custom "Different number of constraints"]))
 				| _ -> ());
-				TInst (mk_class null_module ([],name) Ast.null_pos Ast.null_pos,[])
+				TInst (mk_class null_module ([],name) null_pos null_pos,[])
 			) l1 l2 in
 			List.iter (fun f -> f monos) !to_check;
 			apply_params l1 monos t1, apply_params l2 monos t2
@@ -877,7 +882,7 @@ let check_overriding ctx c =
 				if ctx.com.config.pf_overload && (Meta.has Meta.Overload f2.cf_meta && not (Meta.has Meta.Overload f.cf_meta)) then
 					display_error ctx ("Field " ^ i ^ " should be declared with @:overload since it was already declared as @:overload in superclass") p
 				else if not (List.memq f c.cl_overrides) then
-					display_error ctx ("Field " ^ i ^ " should be declared with 'override' since it is inherited from superclass " ^ Ast.s_type_path csup.cl_path) p
+					display_error ctx ("Field " ^ i ^ " should be declared with 'override' since it is inherited from superclass " ^ s_type_path csup.cl_path) p
 				else if not f.cf_public && f2.cf_public then
 					display_error ctx ("Field " ^ i ^ " has less visibility (public/private) than superclass one") p
 				else (match f.cf_kind, f2.cf_kind with
@@ -1481,7 +1486,7 @@ module Inheritance = struct
 			try
 				let t = load_instance ~allow_display:true ctx t false p in
 				Some (check_herit t is_extends)
-			with Error(Module_not_found(([],name)),p) ->
+			with Error(Module_not_found(([],name)),p) when ctx.com.display.dms_display ->
 				if Display.Diagnostics.is_diagnostics_run ctx then Display.ToplevelCollector.handle_unresolved_identifier ctx name p true;
 				None
 		) herits in
@@ -1817,7 +1822,7 @@ let build_enum_abstract ctx c a fields p =
 			begin match eo with
 				| None ->
 					if not c.cl_extern then error "Value required" field.cff_pos
-					else field.cff_kind <- FProp("default","never",ct,None)
+					else field.cff_kind <- FProp(("default",null_pos),("never",null_pos),ct,None)
 				| Some e ->
 					field.cff_access <- AInline :: field.cff_access;
 					let e = (ECast(e,None),(pos e)) in
@@ -2162,13 +2167,13 @@ module ClassInitializer = struct
 				| Some (csup,_) ->
 					(* this can happen on -net-lib generated classes if a combination of explicit interfaces and variables with the same name happens *)
 					if not (csup.cl_interface && Meta.has Meta.CsNative c.cl_meta) then
-						error ("Redefinition of variable " ^ cf.cf_name ^ " in subclass is not allowed. Previously declared at " ^ (Ast.s_type_path csup.cl_path) ) p
+						error ("Redefinition of variable " ^ cf.cf_name ^ " in subclass is not allowed. Previously declared at " ^ (s_type_path csup.cl_path) ) p
 		end;
 		let t = cf.cf_type in
 
 		match e with
 		| None ->
-			()
+			if fctx.is_display_field then check_field_display ctx (cf.cf_name_pos) cf;
 		| Some e ->
 			if requires_value_meta ctx.com (Some c) then cf.cf_meta <- ((Meta.Value,[e],null_pos) :: cf.cf_meta);
 			let check_cast e =
@@ -2585,24 +2590,25 @@ module ClassInitializer = struct
 				tfun [ta] ret, tfun [ta;ret] ret
 			| _ -> tfun [] ret, TFun(["value",false,ret],ret)
 		in
+		let find_accessor m =
+			(* on pf_overload platforms, the getter/setter may have been defined as an overloaded function; get all overloads *)
+			if ctx.com.config.pf_overload then
+				if fctx.is_static then
+					let f = PMap.find m c.cl_statics in
+					(f.cf_type, f) :: (List.map (fun f -> f.cf_type, f) f.cf_overloads)
+				else
+					Overloads.get_overloads c m
+			else
+				[ if fctx.is_static then
+					let f = PMap.find m c.cl_statics in
+					f.cf_type, f
+				else match class_field c (List.map snd c.cl_params) m with
+					| _, t,f -> t,f ]
+		in
 		let check_method m t req_name =
 			if ctx.com.display.dms_error_policy = EPIgnore then () else
 			try
-				let overloads =
-					(* on pf_overload platforms, the getter/setter may have been defined as an overloaded function; get all overloads *)
-					if ctx.com.config.pf_overload then
-						if fctx.is_static then
-							let f = PMap.find m c.cl_statics in
-							(f.cf_type, f) :: (List.map (fun f -> f.cf_type, f) f.cf_overloads)
-						else
-							Overloads.get_overloads c m
-					else
-						[ if fctx.is_static then
-							let f = PMap.find m c.cl_statics in
-							f.cf_type, f
-						else match class_field c (List.map snd c.cl_params) m with
-							| _, t,f -> t,f ]
-				in
+				let overloads = find_accessor m in
 				(* choose the correct overload if and only if there is more than one overload found *)
 				let rec get_overload overl = match overl with
 					| [tf] -> tf
@@ -2653,28 +2659,37 @@ module ClassInitializer = struct
 							display_error ctx ("Method " ^ m ^ " required by property " ^ name ^ " is missing") p
 					end
 		in
+		let display_accessor m p =
+			try
+				let cf = match find_accessor m with [_,cf] -> cf | _ -> raise Not_found in
+				Display.DisplayEmitter.display_field ctx.com.display cf p
+			with Not_found ->
+				()
+		in
 		let get = (match get with
-			| "null" -> AccNo
-			| "dynamic" -> AccCall
-			| "never" -> AccNever
-			| "default" -> AccNormal
-			| _ ->
+			| "null",_ -> AccNo
+			| "dynamic",_ -> AccCall
+			| "never",_ -> AccNever
+			| "default",_ -> AccNormal
+			| get,pget ->
 				let get = if get = "get" then "get_" ^ name else get in
+				if fctx.is_display_field && Display.is_display_position pget then delay ctx PTypeField (fun () -> display_accessor get pget);
 				if not cctx.is_lib then delay ctx PTypeField (fun() -> check_method get t_get (if get <> "get" && get <> "get_" ^ name then Some ("get_" ^ name) else None));
 				AccCall
 		) in
 		let set = (match set with
-			| "null" ->
+			| "null",_ ->
 				(* standard flash library read-only variables can't be accessed for writing, even in subclasses *)
 				if c.cl_extern && (match c.cl_path with "flash" :: _	, _ -> true | _ -> false) && ctx.com.platform = Flash then
 					AccNever
 				else
 					AccNo
-			| "never" -> AccNever
-			| "dynamic" -> AccCall
-			| "default" -> AccNormal
-			| _ ->
+			| "never",_ -> AccNever
+			| "dynamic",_ -> AccCall
+			| "default",_ -> AccNormal
+			| set,pset ->
 				let set = if set = "set" then "set_" ^ name else set in
+				if fctx.is_display_field && Display.is_display_position pset then delay ctx PTypeField (fun () -> display_accessor set pset);
 				if not cctx.is_lib then delay ctx PTypeField (fun() -> check_method set t_set (if set <> "set" && set <> "set_" ^ name then Some ("set_" ^ name) else None));
 				AccCall
 		) in
@@ -3554,7 +3569,7 @@ let parse_module ctx m p =
 	let pack, decls = (!parse_hook) ctx.com file p in
 	if pack <> !remap then begin
 		let spack m = if m = [] then "<empty>" else String.concat "." m in
-		if p == Ast.null_pos then
+		if p == null_pos then
 			display_error ctx ("Invalid commandline class : " ^ s_type_path m ^ " should be " ^ s_type_path (pack,snd m)) p
 		else
 			display_error ctx ("Invalid package : " ^ spack (fst m) ^ " should be " ^ spack pack) p
@@ -3617,7 +3632,7 @@ let load_module ctx m p =
 			let is_extern = !is_extern in
 			try
 				type_module ctx m file ~is_extern decls p
-			with Forbid_package (inf,pl,pf) when p <> Ast.null_pos ->
+			with Forbid_package (inf,pl,pf) when p <> null_pos ->
 				raise (Forbid_package (inf,p::pl,pf))
 	) in
 	add_dependency ctx.m.curmod m2;
@@ -3712,7 +3727,7 @@ let extend_remoting ctx c t p async prot =
 (* -------------------------------------------------------------------------- *)
 (* HAXE.RTTI.GENERIC *)
 
-exception Generic_Exception of string * Ast.pos
+exception Generic_Exception of string * pos
 
 type generic_context = {
 	ctx : typer;
@@ -3854,7 +3869,7 @@ let rec build_generic ctx c p tl =
 			m_id = alloc_mid();
 			m_path = (pack,name);
 			m_types = [];
-			m_extra = module_extra (s_type_path (pack,name)) m.m_extra.m_sign 0. MFake;
+			m_extra = module_extra (s_type_path (pack,name)) m.m_extra.m_sign 0. MFake m.m_extra.m_check_policy;
 		} in
 		gctx.mg <- Some mg;
 		let cg = mk_class mg (pack,name) c.cl_pos null_pos in

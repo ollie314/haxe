@@ -17,6 +17,7 @@
 	Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  *)
 
+open Globals
 open Ast
 open Common
 open Type
@@ -76,6 +77,7 @@ type typer_globals = {
 	mutable hook_generate : (unit -> unit) list;
 	type_patches : (path, (string * bool, type_patch) Hashtbl.t * type_patch) Hashtbl.t;
 	mutable global_metadata : (string list * metadata_entry * (bool * bool * bool)) list;
+	mutable module_check_policies : (string list * module_check_policy list * bool) list;
 	mutable get_build_infos : unit -> (module_type * t list * class_field list) option;
 	delayed_macros : (unit -> unit) DynArray.t;
 	mutable global_using : (tclass * pos) list;
@@ -286,7 +288,7 @@ let create_fake_module ctx file =
 			m_id = alloc_mid();
 			m_path = (["$DEP"],file);
 			m_types = [];
-			m_extra = module_extra file (Common.get_signature ctx.com) (file_time file) MFake;
+			m_extra = module_extra file (Common.get_signature ctx.com) (file_time file) MFake [];
 		} in
 		Hashtbl.add fake_modules file mdep;
 		mdep
@@ -476,7 +478,7 @@ module AbstractCast = struct
 						if not (has_mono t) then t
 						else t_dynamic
 				) a.a_params pl in
-				if com.platform = Js && a.a_path = ([],"Map") then begin match tl with
+				if com.platform = Globals.Js && a.a_path = ([],"Map") then begin match tl with
 					| t1 :: _ ->
 						let rec loop stack t =
 							if List.exists (fun t2 -> fast_eq t t2) stack then

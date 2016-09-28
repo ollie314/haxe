@@ -1,9 +1,12 @@
 open Printf
+open Globals
 open Ast
 open Common
 open Common.DisplayMode
 open Type
 open DisplayOutput
+
+exception Dirty of module_def
 
 let measure_times = ref false
 let prompt = ref false
@@ -84,7 +87,7 @@ let default_flush ctx =
 
 let create_context params =
 	let ctx = {
-		com = Common.create Globals.version Globals.s_version params;
+		com = Common.create version s_version params;
 		flush = (fun()->());
 		setup = (fun()->());
 		messages = [];
@@ -129,27 +132,24 @@ let ssend sock str =
 let rec wait_loop process_params verbose accept =
 	Sys.catch_break false;
 	let has_parse_error = ref false in
-
-	let signs = ref [] in
+	let cs = CompilationServer.create () in
 	let sign_string com =
 		let sign = get_signature com in
 		let	sign_id =
 			try
-				List.assoc sign !signs
+				CompilationServer.get_sign cs sign;
 			with Not_found ->
-				let i = string_of_int (List.length !signs) in
-				signs := (sign,i) :: !signs;
+				let i = CompilationServer.add_sign cs sign in
 				print_endline (Printf.sprintf "Found context %s:\n%s" i (dump_context com));
 				i
 		in
 		Printf.sprintf "%2s,%3s: " sign_id (short_platform_name com.platform)
 	in
-	let cs = CompilationServer.create () in
 	Typer.macro_enable_cache := true;
 	let current_stdin = ref None in
 	Typeload.parse_hook := (fun com2 file p ->
 		let ffile = Path.unique_full_path file in
-		let is_display_file = ffile = (!Parser.resume_display).Ast.pfile in
+		let is_display_file = ffile = (!Parser.resume_display).pfile in
 
 		match is_display_file, !current_stdin with
 		| true, Some stdin when Common.defined com2 Define.DisplayStdin ->
@@ -165,26 +165,100 @@ let rec wait_loop process_params verbose accept =
 			with Not_found ->
 				has_parse_error := false;
 				let data = Typeload.parse_file com2 file p in
-				let info = if !has_parse_error then "not cached, has parse error"
-					else if is_display_file then "not cached, is display file"
+				let info,is_unusual = if !has_parse_error then "not cached, has parse error",true
+					else if is_display_file then "not cached, is display file",true
 					else begin try
 						(* We assume that when not in display mode it's okay to cache stuff that has #if display
 						   checks. The reasoning is that non-display mode has more information than display mode. *)
 						if not com2.display.dms_display then raise Not_found;
 						let ident = Hashtbl.find Parser.special_identifier_files ffile in
-						Printf.sprintf "not cached, using \"%s\" define" ident;
+						Printf.sprintf "not cached, using \"%s\" define" ident,true
 					with Not_found ->
 						CompilationServer.cache_file cs fkey (ftime,data);
-						"cached"
+						"cached",false
 				end in
-				if verbose then print_endline (Printf.sprintf "%sparsed %s (%s)" (sign_string com2) ffile info);
+				if verbose && is_unusual then print_endline (Printf.sprintf "%sparsed %s (%s)" (sign_string com2) ffile info);
 				data
 	);
-	let check_module_path com m p =
-		if m.m_extra.m_file <> Path.unique_full_path (Typeload.resolve_module_file com m.m_path (ref[]) p) then begin
-			if verbose then print_endline ("Module path " ^ s_type_path m.m_path ^ " has been changed");
-			raise Not_found;
-		end
+	let check_module_shadowing com paths m =
+		List.iter (fun (path,_) ->
+			let file = (path ^ (snd m.m_path)) ^ ".hx" in
+			if Sys.file_exists file then begin
+				let time = file_time file in
+				if time > m.m_extra.m_time then begin
+					if verbose then print_endline (Printf.sprintf "%smodule path might have changed: %s\n\twas: %2.0f %s\n\tnow: %2.0f %s"
+						(sign_string com) (s_type_path m.m_path) m.m_extra.m_time m.m_extra.m_file time file);
+					raise Not_found
+				end
+			end
+		) paths
+	in
+	let delays = ref [] in
+	let changed_directories = Hashtbl.create 0 in
+	let arguments = Hashtbl.create 0 in
+	let stat dir =
+		(Unix.stat (Path.remove_trailing_slash dir)).Unix.st_mtime
+	in
+	let get_changed_directories (ctx : Typecore.typer) =
+		let t = Common.timer ["server";"module cache";"changed dirs"] in
+		let com = ctx.Typecore.com in
+		let sign = get_signature com in
+		let dirs = try
+			(* First, check if we already have determined changed directories for current compilation. *)
+			Hashtbl.find changed_directories sign
+		with Not_found ->
+			let dirs = try
+				(* Next, get all directories from the cache and filter the ones that haven't changed. *)
+				let all_dirs = CompilationServer.find_directories cs sign in
+				List.fold_left (fun acc (dir,time) ->
+					try
+						let time' = stat dir in
+						if !time < time' then begin
+							time := time';
+							let sub_dirs = Path.find_directories (platform_name com.platform) false [dir] in
+							List.iter (fun dir ->
+								if not (CompilationServer.has_directory cs sign dir) then begin
+									let time = stat dir in
+									if verbose then print_endline (Printf.sprintf "%sadded directory %s" (sign_string com) dir);
+									CompilationServer.add_directory cs sign (dir,ref time)
+								end;
+							) sub_dirs;
+							(dir,time') :: acc
+						end else
+							acc
+					with Unix.Unix_error _ ->
+						CompilationServer.remove_directory cs sign dir;
+						if verbose then print_endline (Printf.sprintf "%sremoved directory %s" (sign_string com) dir);
+						acc
+				) [] all_dirs
+			with Not_found ->
+				(* There were no directories in the cache, so this must be a new context. Let's add
+				   an empty list to make sure no crazy recursion happens. *)
+				CompilationServer.add_directories cs sign [];
+				(* Register the delay that is going to populate the cache dirs. *)
+				delays := (fun () ->
+					let dirs = ref [] in
+					let add_dir path =
+						try
+							let time = stat path in
+							dirs := (path,ref time) :: !dirs
+						with Unix.Unix_error _ ->
+							()
+					in
+					List.iter add_dir com.class_path;
+					List.iter add_dir (Path.find_directories (platform_name com.platform) true com.class_path);
+					if verbose then print_endline (Printf.sprintf "%sfound %i directories" (sign_string com) (List.length !dirs));
+					CompilationServer.add_directories cs sign !dirs
+				) :: !delays;
+				(* Returning [] should be fine here because it's a new context, so we won't do any
+				   shadowing checks anyway. *)
+				[]
+			in
+			Hashtbl.add changed_directories sign dirs;
+			dirs
+		in
+		t();
+		dirs
 	in
 	let compilation_step = ref 0 in
 	let compilation_mark = ref 0 in
@@ -193,59 +267,93 @@ let rec wait_loop process_params verbose accept =
 		let t = Common.timer ["server";"module cache"] in
 		let com2 = ctx.Typecore.com in
 		let sign = get_signature com2 in
-		let dep = ref None in
+		let content_changed m file =
+			let ffile = Path.unique_full_path file in
+			let fkey = (ffile,sign) in
+			try
+				let _, old_data = CompilationServer.find_file cs fkey in
+				(* We must use the module path here because the file path is absolute and would cause
+				   positions in the parsed declarations to differ. *)
+				let new_data = Typeload.parse_module ctx m.m_path p in
+				snd old_data <> snd new_data
+			with Not_found ->
+				true
+		in
 		incr mark_loop;
 		let mark = !mark_loop in
 		let start_mark = !compilation_mark in
 		let rec check m =
-			if m.m_extra.m_dirty then begin
-				dep := Some m;
-				false
-			end else if m.m_extra.m_mark = mark then
-				true
-			else try
-				if m.m_extra.m_mark <= start_mark then begin
-					(match m.m_extra.m_kind with
-					| MFake | MSub | MImport -> () (* don't get classpath *)
-					| MExtern ->
-						(* if we have a file then this will override our extern type *)
-						let has_file = (try ignore(Typeload.resolve_module_file com2 m.m_path (ref[]) p); true with Not_found -> false) in
-						if has_file then begin
-							if verbose then print_endline ("A file is masking the library file " ^ s_type_path m.m_path);
-							raise Not_found;
-						end;
-						let rec loop = function
-							| [] ->
-								if verbose then print_endline ("No library file was found for " ^ s_type_path m.m_path);
-								raise Not_found (* no extern registration *)
-							| load :: l ->
-								match load m.m_path p with
-								| None -> loop l
-								| Some (file,_) ->
-									if Path.unique_full_path file <> m.m_extra.m_file then begin
-										if verbose then print_endline ("Library file was changed for " ^ s_type_path m.m_path);
-										raise Not_found;
-									end
-						in
-						loop com2.load_extern_type
-					| MCode -> check_module_path com2 m p
-					| MMacro when ctx.Typecore.in_macro -> check_module_path com2 m p
-					| MMacro ->
-						let _, mctx = Typer.get_macro_context ctx p in
-						check_module_path mctx.Typecore.com m p
-					);
-					if file_time m.m_extra.m_file <> m.m_extra.m_time then begin
+			let check_module_path () =
+				let directories = get_changed_directories ctx in
+				match m.m_extra.m_kind with
+				| MFake | MSub | MImport -> () (* don't get classpath *)
+				| MExtern ->
+					(* if we have a file then this will override our extern type *)
+					let has_file = (try check_module_shadowing com2 directories m; true with Not_found -> false) in
+					if has_file then begin
+						if verbose then print_endline ("A file is masking the library file " ^ s_type_path m.m_path);
+						raise Not_found;
+					end;
+					let rec loop = function
+						| [] ->
+							if verbose then print_endline ("No library file was found for " ^ s_type_path m.m_path);
+							raise Not_found (* no extern registration *)
+						| load :: l ->
+							match load m.m_path p with
+							| None -> loop l
+							| Some (file,_) ->
+								if Path.unique_full_path file <> m.m_extra.m_file then begin
+									if verbose then print_endline ("Library file was changed for " ^ s_type_path m.m_path);
+									raise Not_found;
+								end
+					in
+					loop com2.load_extern_type
+				| MCode -> check_module_shadowing com2 directories m
+				| MMacro when ctx.Typecore.in_macro -> check_module_shadowing com2 directories m
+				| MMacro ->
+					let _, mctx = Typer.get_macro_context ctx p in
+					check_module_shadowing mctx.Typecore.com (get_changed_directories mctx) m
+			in
+			let has_policy policy = List.mem policy m.m_extra.m_check_policy in
+			let check_file () =
+				if file_time m.m_extra.m_file <> m.m_extra.m_time then begin
+					if has_policy CheckFileContentModification && not (content_changed m m.m_extra.m_file) then begin
+						if verbose then print_endline (Printf.sprintf "%s%s changed time not but content, reusing" (sign_string com2) m.m_extra.m_file)
+					end else begin
 						if verbose then print_endline (Printf.sprintf "%s%s not cached (%s)" (sign_string com2) (s_type_path m.m_path) (if m.m_extra.m_time = -1. then "macro-in-macro" else "modified"));
 						if m.m_extra.m_kind = MFake then Hashtbl.remove Typecore.fake_modules m.m_extra.m_file;
 						raise Not_found;
+					end
+				end
+			in
+			let check_dependencies () =
+				PMap.iter (fun _ m2 -> match check m2 with
+					| None -> ()
+					| Some m -> raise (Dirty m)
+				) m.m_extra.m_deps;
+			in
+			begin match m.m_extra.m_dirty with
+			| Some m ->
+				Some m
+			| None ->
+				if m.m_extra.m_mark = mark then
+					None
+				else try
+					if m.m_extra.m_mark <= start_mark then begin
+						if not (has_policy NoCheckShadowing) then check_module_path();
+						if not (has_policy NoCheckFileTimeModification) then check_file();
 					end;
-				end;
-				m.m_extra.m_mark <- mark;
-				PMap.iter (fun _ m2 -> if not (check m2) then begin dep := Some m2; raise Not_found end) m.m_extra.m_deps;
-				true
-			with Not_found ->
-				m.m_extra.m_dirty <- true;
-				false
+					m.m_extra.m_mark <- mark;
+					if not (has_policy NoCheckDependencies) then check_dependencies();
+					None
+				with
+				| Not_found ->
+					m.m_extra.m_dirty <- Some m;
+					Some m
+				| Dirty m' ->
+					m.m_extra.m_dirty <- Some m';
+					Some m'
+				end
 		in
 		let rec add_modules tabs m0 m =
 			if m.m_extra.m_added < !compilation_step then begin
@@ -254,7 +362,7 @@ let rec wait_loop process_params verbose accept =
 					(* this was just a dependency to check : do not add to the context *)
 					PMap.iter (Hashtbl.replace com2.resources) m.m_extra.m_binded_res;
 				| _ ->
-					if verbose then print_endline (Printf.sprintf "%s%sreusing %s" (sign_string com2) tabs (s_type_path m.m_path));
+					(*if verbose then print_endline (Printf.sprintf "%s%sreusing %s" (sign_string com2) tabs (s_type_path m.m_path));*)
 					m.m_extra.m_added <- !compilation_step;
 					List.iter (fun t ->
 						match t with
@@ -262,27 +370,33 @@ let rec wait_loop process_params verbose accept =
 						| TEnumDecl e ->
 							let rec loop acc = function
 								| [] -> ()
-								| (Ast.Meta.RealPath,[Ast.EConst (Ast.String path),_],_) :: l ->
+								| (Meta.RealPath,[Ast.EConst (Ast.String path),_],_) :: l ->
 									e.e_path <- Ast.parse_path path;
 									e.e_meta <- (List.rev acc) @ l;
 								| x :: l -> loop (x::acc) l
 							in
 							loop [] e.e_meta
 						| TAbstractDecl a ->
-							a.a_meta <- List.filter (fun (m,_,_) -> m <> Ast.Meta.ValueUsed) a.a_meta
+							a.a_meta <- List.filter (fun (m,_,_) -> m <> Meta.ValueUsed) a.a_meta
 						| _ -> ()
 					) m.m_types;
 					if m.m_extra.m_kind <> MSub then Typeload.add_module ctx m p;
 					PMap.iter (Hashtbl.replace com2.resources) m.m_extra.m_binded_res;
-					PMap.iter (fun _ m2 -> add_modules (tabs ^ "  ") m0 m2) m.m_extra.m_deps);
+					if ctx.Typecore.in_macro || com2.display.dms_full_typing then
+						PMap.iter (fun _ m2 -> add_modules (tabs ^ "  ") m0 m2) m.m_extra.m_deps;
 					List.iter (Typer.call_init_macro ctx) m.m_extra.m_macro_calls
+				)
 			end
 		in
 		try
 			let m = CompilationServer.find_module cs (mpath,sign) in
+			(* force reloading of display file *)
+			if m.m_extra.m_file = (!Parser.resume_display).pfile then raise Not_found;
 			let tcheck = Common.timer ["server";"module cache";"check"] in
-			if not (check m) then begin
-				if verbose then print_endline (Printf.sprintf "%sskipping %s%s" (sign_string com2) (s_type_path m.m_path) (Option.map_default (fun m -> Printf.sprintf " (via %s)" (s_type_path m.m_path)) "" !dep));
+			begin match check m with
+			| None -> ()
+			| Some m' ->
+				if verbose then print_endline (Printf.sprintf "%sskipping %s%s" (sign_string com2) (s_type_path m.m_path) (if m == m' then "" else Printf.sprintf "(%s)" (s_type_path m'.m_path)));
 				tcheck();
 				raise Not_found;
 			end;
@@ -302,7 +416,7 @@ let rec wait_loop process_params verbose accept =
 		let rec cache_context com =
 			let cache_module m =
 				CompilationServer.cache_module cs (m.m_path,m.m_extra.m_sign) m;
-				if verbose then print_endline (Printf.sprintf "%scached %s" (sign_string com) (s_type_path m.m_path));
+				(*if verbose then print_endline (Printf.sprintf "%scached %s" (sign_string com) (s_type_path m.m_path));*)
 			in
 			if com.display.dms_full_typing then begin
 				List.iter cache_module com.modules;
@@ -321,21 +435,29 @@ let rec wait_loop process_params verbose accept =
 				if ctx.has_error then write "\x02\n" else cache_context ctx.com;
 			);
 			ctx.setup <- (fun() ->
+				let sign = get_signature ctx.com in
 				if verbose then begin
 					let defines = PMap.foldi (fun k v acc -> (k ^ "=" ^ v) :: acc) ctx.com.defines [] in
 					print_endline ("Defines " ^ (String.concat "," (List.sort compare defines)));
-					print_endline ("Using signature " ^ Digest.to_hex (get_signature ctx.com));
+					print_endline ("Using signature " ^ Digest.to_hex sign);
 					print_endline ("Display position: " ^ (Printer.s_pos !Parser.resume_display));
 				end;
 				Parser.display_error := (fun e p -> has_parse_error := true; ctx.com.error (Parser.error_msg e) p);
 				if ctx.com.display.dms_display then begin
-					let file = (!Parser.resume_display).Ast.pfile in
-					let fkey = (file,get_signature ctx.com) in
+					let file = (!Parser.resume_display).pfile in
+					let fkey = (file,sign) in
 					(* force parsing again : if the completion point have been changed *)
 					CompilationServer.remove_file cs fkey;
-					(* force module reloading (if cached) *)
-					CompilationServer.taint_modules cs file;
-				end
+				end;
+				try
+					if (Hashtbl.find arguments sign) <> ctx.com.class_path then begin
+						if verbose then print_endline (Printf.sprintf "%sclass paths changed, resetting directories" (sign_string ctx.com));
+						Hashtbl.replace arguments sign ctx.com.class_path;
+						CompilationServer.clear_directories cs sign;
+					end;
+				with Not_found ->
+					Hashtbl.add arguments sign ctx.com.class_path;
+					()
 			);
 			ctx.com.print <- (fun str -> write ("\x01" ^ String.concat "\x01" (ExtString.String.nsplit str "\n") ^ "\n"));
 			ctx
@@ -354,8 +476,9 @@ let rec wait_loop process_params verbose accept =
 			let data = parse_hxml_data hxml in
 			if verbose then print_endline ("Processing Arguments [" ^ String.concat "," data ^ "]");
 			(try
+				Hashtbl.clear changed_directories;
 				Common.display_default := DMNone;
-				Parser.resume_display := Ast.null_pos;
+				Parser.resume_display := null_pos;
 				Typeload.return_partial_type := false;
 				measure_times := false;
 				close_times();
@@ -378,10 +501,13 @@ let rec wait_loop process_params verbose accept =
 			| Arg.Bad msg ->
 				prerr_endline ("Error: " ^ msg);
 			);
+			let fl = !delays in
+			delays := [];
+			List.iter (fun f -> f()) fl;
 			if verbose then begin
 				print_endline (Printf.sprintf "Stats = %d files, %d classes, %d methods, %d macros" !(stats.s_files_parsed) !(stats.s_classes_built) !(stats.s_methods_typed) !(stats.s_macros_called));
 				print_endline (Printf.sprintf "Time spent : %.3fs" (get_time() -. t0));
-			end
+			end;
 		with Unix.Unix_error _ ->
 			if verbose then print_endline "Connection Aborted"
 		| e ->
