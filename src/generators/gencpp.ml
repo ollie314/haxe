@@ -2885,7 +2885,8 @@ let retype_expression ctx request_type function_args expression_tree forInjectio
             else (match return_type with
             | TCppNativePointer(klass) -> CppCastNative(baseCpp), return_type
             | TCppVoid -> baseCpp.cppexpr, TCppVoid
-            | TCppInterface _
+            | TCppInterface _ ->
+                  baseCpp.cppexpr, return_type
             | TCppDynamic ->
                   baseCpp.cppexpr, baseCpp.cpptype
             | _ ->
@@ -6161,9 +6162,10 @@ let write_build_data common_ctx filename classes main_deps boot_deps build_extra
    output_string buildfile "</files>\n";
    output_string buildfile "<files id=\"__resources__\">\n";
    let idx = ref 0 in
+   let ext = source_file_extension common_ctx in
    Hashtbl.iter (fun _ data ->
       let id = "__res_" ^ (string_of_int !idx) in
-      output_string buildfile ("<file name=\"src/resources/" ^ id ^ ".cpp\" tags=\"optim-none\" />\n");
+      output_string buildfile ("<file name=\"src/resources/" ^ id ^ ext ^ "\" tags=\"optim-none\" />\n");
       incr idx;
    ) common_ctx.resources;
    output_string buildfile "</files>\n";
